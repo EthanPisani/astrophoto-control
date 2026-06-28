@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AstroCap</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Tokens ─────────────────────────────────────────────────────────── */
+    :root {
+      --bg:        #07090f;
+      --surface:   #0c1120;
+      --panel:     #101828;
+      --border:    #1c2d47;
+      --border-hi: #2a4266;
+      --accent:    #3b82f6;
+      --accent-lo: rgba(59,130,246,.12);
+      --cyan:      #67e8f9;
+      --cyan-lo:   rgba(103,232,249,.10);
+      --star:      #e8f0ff;
+      --muted:     #4a6080;
+      --muted-hi:  #7a96b8;
+      --ok:        #34d399;
+      --ok-lo:     rgba(52,211,153,.12);
+      --warn:      #fbbf24;
+      --danger:    #f43f5e;
+      --danger-lo: rgba(244,63,94,.12);
+      --mono: 'IBM Plex Mono', monospace;
+      --sans: 'Inter', sans-serif;
+      --r:   8px;
+    }
+
+    /* ── Reset ──────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--star);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Starfield ──────────────────────────────────────────────────────── */
+    #cv {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      opacity: .4;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────────────────── */
+    .wrap {
+      position: relative; z-index: 1;
+      max-width: 900px; margin: 0 auto;
+      padding: 32px 20px 80px;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .hdr {
+      display: flex; align-items: flex-start; gap: 16px;
+      padding-bottom: 24px; margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+    }
+    .hdr-logo {
+      font-family: var(--mono); font-size: 20px; font-weight: 700;
+      color: var(--cyan); letter-spacing: -.5px;
+      line-height: 1.2;
+    }
+    .hdr-logo small {
+      display: block; font-size: 11px; font-weight: 400;
+      color: var(--muted); letter-spacing: .5px; margin-top: 2px;
+    }
+    .hdr-right {
+      margin-left: auto; display: flex; align-items: center; gap: 10px;
+    }
+    .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+      transition: background .3s, box-shadow .3s;
+    }
+    .dot.ok   { background: var(--ok);     box-shadow: 0 0 8px var(--ok); }
+    .dot.err  { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+    .dot.spin { animation: spin-dot 1s linear infinite; }
+    @keyframes spin-dot {
+      0%   { box-shadow: 0 0 0 0 var(--accent); }
+      50%  { box-shadow: 0 0 10px 2px var(--accent); }
+      100% { box-shadow: 0 0 0 0 var(--accent); }
+    }
+    .hdr-cam {
+      font-family: var(--mono); font-size: 12px; color: var(--muted-hi);
+      text-align: right; line-height: 1.4;
+    }
+    .hdr-cam strong { color: var(--cyan); font-weight: 500; }
+
+    /* ── Tabs ───────────────────────────────────────────────────────────── */
+    .tabs {
+      display: flex; gap: 2px; margin-bottom: 24px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 4px; width: fit-content;
+    }
+    .tab {
+      padding: 6px 18px; border-radius: 6px; border: none; cursor: pointer;
+      font-family: var(--sans); font-size: 13px; font-weight: 500;
+      background: transparent; color: var(--muted);
+      transition: all .2s;
+    }
+    .tab.on { background: var(--panel); color: var(--star);
+      box-shadow: 0 1px 4px rgba(0,0,0,.4), inset 0 0 0 1px var(--border); }
+    .tab:hover:not(.on) { color: var(--star); }
+
+    .pane { display: none; }
+    .pane.on { display: block; }
+
+    /* ── Cards ──────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px; margin-bottom: 16px;
+    }
+    .card-ttl {
+      font-family: var(--mono); font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1.8px;
+      color: var(--muted); margin-bottom: 18px;
+    }
+
+    /* ── Mode switch ────────────────────────────────────────────────────── */
+    .msw {
+      display: flex; background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 3px; width: fit-content; margin-bottom: 20px;
+    }
+    .msw-btn {
+      padding: 6px 16px; border-radius: 6px; border: none; cursor: pointer;
+      font-family: var(--sans); font-size: 13px; font-weight: 500;
+      background: transparent; color: var(--muted); transition: all .2s;
+    }
+    .msw-btn.on { background: var(--accent); color: #fff; }
+
+    /* ── Grid ───────────────────────────────────────────────────────────── */
+    .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    @media (max-width: 580px) { .g2, .g3 { grid-template-columns: 1fr; } }
+
+    /* ── Fields ─────────────────────────────────────────────────────────── */
+    .fld { display: flex; flex-direction: column; gap: 5px; }
+    .fld label {
+      font-size: 11px; font-weight: 500; color: var(--muted);
+      font-family: var(--mono); text-transform: uppercase; letter-spacing: .8px;
+    }
+    .fld input, .fld select {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 9px 12px;
+      color: var(--star); font-family: var(--mono); font-size: 13px;
+      outline: none; width: 100%;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .fld input:focus, .fld select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(59,130,246,.15);
+    }
+    .fld .hint { font-size: 11px; color: var(--muted); }
+    input[type="datetime-local"] { color-scheme: dark; }
+    /* hide arrows on number inputs */
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }
+    input[type=number] { -moz-appearance: textfield; }
+
+    /* ── Derived pill ───────────────────────────────────────────────────── */
+    .derived {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 9px 13px;
+      font-family: var(--mono); font-size: 14px; font-weight: 700;
+      color: var(--cyan);
+    }
+    .derived small {
+      display: block; font-size: 10px; font-weight: 400;
+      color: var(--muted); letter-spacing: .5px; text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+
+    /* ── Divider ────────────────────────────────────────────────────────── */
+    .div { height: 1px; background: var(--border); margin: 20px 0; }
+
+    /* ── Session summary strip ──────────────────────────────────────────── */
+    .summary-strip {
+      background: var(--accent-lo); border: 1px solid rgba(59,130,246,.25);
+      border-radius: var(--r); padding: 10px 14px;
+      font-family: var(--mono); font-size: 12px; color: var(--cyan);
+      margin-bottom: 18px; display: none; line-height: 1.9;
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────────────── */
+    .btn {
+      padding: 10px 22px; border-radius: var(--r); border: none;
+      font-family: var(--sans); font-size: 14px; font-weight: 600;
+      cursor: pointer; transition: all .2s; letter-spacing: .1px;
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #5b95f7; }
+    .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent; color: var(--muted-hi);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { color: var(--star); border-color: var(--muted); }
+    .btn-danger {
+      background: var(--danger-lo); color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    .btn-danger:hover { background: rgba(244,63,94,.2); }
+    .btn-danger:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+    /* ── Error banner ───────────────────────────────────────────────────── */
+    .err-banner {
+      background: var(--danger-lo); border: 1px solid var(--danger);
+      border-radius: var(--r); padding: 11px 15px;
+      font-size: 13px; color: var(--danger); margin-bottom: 16px;
+      display: none;
+    }
+
+    /* ── Progress card ──────────────────────────────────────────────────── */
+    #prog-card { display: none; }
+
+    .prog-hdr {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 18px;
+    }
+
+    /* status badge */
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 11px; border-radius: 100px;
+      font-family: var(--mono); font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+      border: 1px solid transparent;
+    }
+    .badge-dot { width: 6px; height: 6px; border-radius: 50%; }
+    .s-running  { border-color: rgba(59,130,246,.4); color: var(--accent); }
+    .s-running  .badge-dot { background: var(--accent); animation: blink 1s step-start infinite; }
+    .s-canceling{ border-color: rgba(251,191,36,.4); color: var(--warn); }
+    .s-canceling .badge-dot { background: var(--warn); }
+    .s-done     { border-color: rgba(52,211,153,.4); color: var(--ok); }
+    .s-done     .badge-dot { background: var(--ok); }
+    .s-canceled { border-color: rgba(251,191,36,.3); color: var(--warn); }
+    .s-canceled .badge-dot { background: var(--warn); }
+    .s-error    { border-color: rgba(244,63,94,.4); color: var(--danger); }
+    .s-error    .badge-dot { background: var(--danger); }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* count display */
+    .count-row {
+      display: flex; align-items: baseline; gap: 6px; margin-bottom: 10px;
+    }
+    .count-big {
+      font-family: var(--mono); font-size: 36px; font-weight: 700;
+      color: var(--star); line-height: 1;
+    }
+    .count-of {
+      font-family: var(--mono); font-size: 15px; color: var(--muted);
+    }
+
+    /* progress bar */
+    .bar-wrap {
+      background: var(--surface); border-radius: 100px; height: 6px;
+      border: 1px solid var(--border); overflow: hidden; margin-bottom: 20px;
+    }
+    .bar {
+      height: 100%; border-radius: 100px;
+      background: linear-gradient(90deg, var(--accent), var(--cyan));
+      width: 0%; transition: width .5s ease;
+    }
+    .bar.pulse { animation: bar-pulse 1.4s ease-in-out infinite; }
+    @keyframes bar-pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+
+    /* exposure ring + countdown */
+    .exp-wrap {
+      display: flex; align-items: center; gap: 18px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 18px; margin-bottom: 16px;
+    }
+    .ring-svg {
+      width: 60px; height: 60px; flex-shrink: 0;
+      transform: rotate(-90deg);
+    }
+    .ring-svg circle { fill: none; stroke-width: 5; }
+    .ring-bg   { stroke: var(--border); }
+    .ring-fill {
+      stroke: var(--cyan); stroke-linecap: round;
+      stroke-dasharray: 163; stroke-dashoffset: 163;
+      transition: stroke-dashoffset .35s linear;
+    }
+    .exp-info { flex: 1; }
+    .exp-phase {
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .8px; margin-bottom: 3px;
+    }
+    .exp-val {
+      font-family: var(--mono); font-size: 26px; font-weight: 700;
+      color: var(--cyan); line-height: 1;
+    }
+    .exp-total {
+      font-size: 11px; color: var(--muted); font-family: var(--mono);
+      margin-top: 3px;
+    }
+
+    /* stats grid */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px; margin-bottom: 16px;
+    }
+    .stat {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 12px 14px;
+    }
+    .stat-lbl {
+      font-family: var(--mono); font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .stat-val {
+      font-family: var(--mono); font-size: 15px; font-weight: 700;
+      color: var(--star);
+    }
+
+    /* output dir row */
+    .outdir {
+      display: flex; align-items: center; gap: 8px;
+      font-family: var(--mono); font-size: 11px; color: var(--muted);
+      padding-top: 14px; margin-top: 4px;
+      border-top: 1px solid var(--border);
+      word-break: break-all;
+    }
+    .outdir span { color: var(--muted-hi); }
+
+    /* capture log */
+    .log-wrap {
+      max-height: 210px; overflow-y: auto;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); margin-top: 4px;
+    }
+    .log-wrap::-webkit-scrollbar { width: 4px; }
+    .log-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .log-row {
+      display: grid;
+      grid-template-columns: 36px 18px 1fr auto;
+      gap: 8px; align-items: center;
+      padding: 7px 12px;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono); font-size: 11px;
+    }
+    .log-row:last-child { border-bottom: none; }
+    .log-idx  { color: var(--muted); }
+    .log-ok   { color: var(--ok); }
+    .log-err  { color: var(--danger); }
+    .log-name {
+      color: var(--muted-hi); overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .log-name.err { color: var(--danger); }
+    .log-time { color: var(--muted); white-space: nowrap; }
+
+    .log-empty {
+      padding: 14px 12px; font-family: var(--mono); font-size: 11px;
+      color: var(--muted);
+    }
+
+    /* ── Camera tab ─────────────────────────────────────────────────────── */
+    pre.raw {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 14px;
+      font-family: var(--mono); font-size: 11px; color: var(--muted-hi);
+      overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+      max-height: 340px; overflow-y: auto;
+    }
+    pre.raw::-webkit-scrollbar { width: 4px; height: 4px; }
+    pre.raw::-webkit-scrollbar-thumb { background: var(--border); }
+  </style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div class="wrap">
+
+  <!-- ── Header ─────────────────────────────────────────────────────── -->
+  <header class="hdr">
+    <div>
+      <div class="hdr-logo">
+        AstroCap
+        <small>gphoto2 / nikon_bulb_server</small>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <div class="hdr-cam">
+        <strong id="hdr-cam-name">—</strong><br>
+        <span id="hdr-cam-status">checking…</span>
+      </div>
+      <div class="dot spin" id="hdr-dot"></div>
+    </div>
+  </header>
+
+  <div class="err-banner" id="err-banner"></div>
+
+  <!-- ── Tabs ───────────────────────────────────────────────────────── -->
+  <div class="tabs">
+    <button class="tab on"  onclick="tab('capture')">Capture</button>
+    <button class="tab"     onclick="tab('camera')">Camera</button>
+  </div>
+
+  <!-- ═══════════════ CAPTURE PANE ══════════════════════════════════ -->
+  <div class="pane on" id="pane-capture">
+
+    <!-- Settings card -->
+    <div class="card" id="settings-card">
+      <div class="card-ttl">Session Setup</div>
+
+      <div class="msw">
+        <button class="msw-btn on" id="mbtn-count"   onclick="setMode('count')">By Count</button>
+        <button class="msw-btn"    id="mbtn-endtime" onclick="setMode('endtime')">By End Time</button>
+      </div>
+
+      <!-- By Count fields -->
+      <div id="f-count">
+        <div class="g2" style="margin-bottom:14px">
+          <div class="fld">
+            <label>Number of Photos</label>
+            <input type="number" id="num-photos" min="1" max="9999" value="20" oninput="recalc()" />
+          </div>
+          <div class="fld">
+            <label>Exposure (seconds)</label>
+            <input type="number" id="exp-sec" min="1" max="3600" value="30" oninput="recalc()" />
+          </div>
+        </div>
+        <div class="g2">
+          <div class="fld">
+            <label>Interval Between Captures (sec)</label>
+            <input type="number" id="ivl-sec" min="0" max="3600" value="5" oninput="recalc()" />
+          </div>
+          <div>
+            <label class="fld"><label>Estimated Session Duration</label></label>
+            <div class="derived" id="d-duration">
+              <small>Total time</small>—
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- By End Time fields -->
+      <div id="f-endtime" style="display:none">
+        <div class="g2" style="margin-bottom:14px">
+          <div class="fld">
+            <label>End Date &amp; Time</label>
+            <input type="datetime-local" id="end-time" oninput="recalcET()" />
+          </div>
+          <div class="fld">
+            <label>Exposure (seconds)</label>
+            <input type="number" id="exp-sec-et" min="1" max="3600" value="30" oninput="recalcET()" />
+          </div>
+        </div>
+        <div class="g2">
+          <div class="fld">
+            <label>Interval Between Captures (sec)</label>
+            <input type="number" id="ivl-sec-et" min="0" max="3600" value="5" oninput="recalcET()" />
+          </div>
+          <div>
+            <div class="fld"><label>Auto-Calculated Photos</label></div>
+            <div class="derived" id="d-count">
+              <small>Photos</small>—
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="div"></div>
+
+      <!-- Camera settings -->
+      <div class="card-ttl">Camera Settings</div>
+      <div class="g3" style="margin-bottom:14px">
+        <div class="fld">
+          <label>ISO</label>
+          <input type="text" id="iso" placeholder="e.g. 3200" />
+          <span class="hint">Blank = camera default</span>
+        </div>
+        <div class="fld">
+          <label>Aperture (f/)</label>
+          <input type="text" id="aperture" placeholder="e.g. 2.8" />
+          <span class="hint">Blank = camera default</span>
+        </div>
+        <div class="fld">
+          <label>Image Format</label>
+          <select id="img-fmt">
+            <option value="RAW">RAW</option>
+            <option value="JPEG">JPEG</option>
+            <option value="RAW+JPEG">RAW + JPEG</option>
+          </select>
+        </div>
+      </div>
+      <div class="g2">
+        <div class="fld">
+          <label>Capture Target</label>
+          <select id="cap-tgt">
+            <option value="sdram">RAM → transfer to PC</option>
+            <option value="card">SD Card → leave on card</option>
+          </select>
+        </div>
+        <div class="fld">
+          <label>Auto USB Recovery</label>
+          <select id="auto-rec">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="div"></div>
+
+      <div class="summary-strip" id="sum-strip"></div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" id="start-btn" onclick="startSession()">
+          ▶ Start Session
+        </button>
+        <button class="btn btn-ghost" onclick="checkHealth()">↻ Check Camera</button>
+      </div>
+    </div>
+
+    <!-- Progress card -->
+    <div class="card" id="prog-card">
+
+      <div class="prog-hdr">
+        <div class="card-ttl" style="margin:0">Live Progress</div>
+        <div class="badge s-running" id="badge">
+          <div class="badge-dot"></div>
+          <span id="badge-txt">Running</span>
+        </div>
+      </div>
+
+      <div class="count-row">
+        <div class="count-big" id="p-done">0</div>
+        <div class="count-of">/ <span id="p-total">0</span> captures</div>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar pulse" id="pbar"></div>
+      </div>
+
+      <!-- Exposure ring -->
+      <div class="exp-wrap">
+        <svg class="ring-svg" viewBox="0 0 60 60">
+          <circle class="ring-bg"   cx="30" cy="30" r="26" />
+          <circle class="ring-fill" id="ring" cx="30" cy="30" r="26" />
+        </svg>
+        <div class="exp-info">
+          <div class="exp-phase" id="exp-phase">Waiting</div>
+          <div class="exp-val"   id="exp-val">—</div>
+          <div class="exp-total" id="exp-total"></div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stat-grid">
+        <div class="stat">
+          <div class="stat-lbl">Elapsed</div>
+          <div class="stat-val" id="s-elapsed">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-lbl">ETA</div>
+          <div class="stat-val" id="s-eta">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-lbl">Est. Finish</div>
+          <div class="stat-val" id="s-finish">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-lbl">Remaining</div>
+          <div class="stat-val" id="s-remain">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-lbl">Errors</div>
+          <div class="stat-val" id="s-errors">0</div>
+        </div>
+      </div>
+
+      <!-- Output dir -->
+      <div class="outdir">📁 <span id="outdir-val">—</span></div>
+
+      <!-- Log -->
+      <div class="card-ttl" style="margin-top:18px;margin-bottom:6px">Capture Log</div>
+      <div class="log-wrap" id="cap-log">
+        <div class="log-empty">Waiting for first capture…</div>
+      </div>
+
+      <div class="div"></div>
+      <div class="btn-row">
+        <button class="btn btn-danger"   id="cancel-btn" onclick="cancelSession()">⏹ Cancel</button>
+        <button class="btn btn-primary"  id="new-btn"    onclick="newSession()" style="display:none">
+          ＋ New Session
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /pane-capture -->
+
+  <!-- ═══════════════ CAMERA PANE ════════════════════════════════════ -->
+  <div class="pane" id="pane-camera">
+
+    <div class="card">
+      <div class="card-ttl">Health &amp; Recovery</div>
+      <div class="btn-row" style="margin-bottom:16px">
+        <button class="btn btn-ghost" onclick="checkHealth()">↻ Refresh</button>
+        <button class="btn btn-ghost" onclick="doRecover()">⚡ Recover Camera</button>
+      </div>
+      <pre class="raw" id="health-raw">—</pre>
+    </div>
+
+    <div class="card">
+      <div class="card-ttl">Capabilities</div>
+      <button class="btn btn-ghost" onclick="fetchCaps()" style="margin-bottom:16px">
+        Fetch Capabilities
+      </button>
+      <pre class="raw" id="caps-raw">Click "Fetch Capabilities" to load.</pre>
+    </div>
+
+  </div><!-- /pane-camera -->
+
+</div><!-- /wrap -->
+
+<script>
+// ── Stars ──────────────────────────────────────────────────────────────────
+(function () {
+  const cv = document.getElementById('cv');
+  const cx = cv.getContext('2d');
+  let stars = [];
+
+  function resize() {
+    cv.width = innerWidth; cv.height = innerHeight;
+    stars = Array.from({ length: Math.floor(cv.width * cv.height / 4800) }, () => ({
+      x: Math.random() * cv.width,
+      y: Math.random() * cv.height,
+      r: Math.random() * 1.3 + 0.2,
+      a: Math.random(),
+      da: (Math.random() - .5) * .004,
+    }));
+  }
+
+  function draw() {
+    cx.clearRect(0, 0, cv.width, cv.height);
+    for (const s of stars) {
+      s.a = Math.max(.05, Math.min(1, s.a + s.da));
+      if (s.a <= .05 || s.a >= 1) s.da *= -1;
+      cx.beginPath();
+      cx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      cx.fillStyle = `rgba(190,215,255,${s.a})`;
+      cx.fill();
+    }
+    requestAnimationFrame(draw);
+  }
+
+  addEventListener('resize', resize);
+  resize(); draw();
+})();
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function fmtDur(s) {
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+function fmtTime(epoch) {
+  return new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  return [r.status, await r.json().catch(() => ({}))];
+}
+
+// ── Tab switch ──────────────────────────────────────────────────────────────
+function tab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const n = ['capture', 'camera'][i];
+    t.classList.toggle('on', n === name);
+  });
+  document.querySelectorAll('.pane').forEach(p => {
+    p.classList.toggle('on', p.id === `pane-${name}`);
+  });
+}
+
+// ── Mode switch ─────────────────────────────────────────────────────────────
+let mode = 'count';
+
+function setMode(m) {
+  mode = m;
+  $('mbtn-count').classList.toggle('on', m === 'count');
+  $('mbtn-endtime').classList.toggle('on', m === 'endtime');
+  $('f-count').style.display   = m === 'count'   ? 'block' : 'none';
+  $('f-endtime').style.display = m === 'endtime' ? 'block' : 'none';
+  if (m === 'endtime' && !$('end-time').value) {
+    const d = new Date(Date.now() + 2 * 3600 * 1000);
+    $('end-time').value = d.toISOString().slice(0, 16);
+    recalcET();
+  }
+  recalc();
+}
+
+// ── Calculation ─────────────────────────────────────────────────────────────
+function recalc() {
+  const n   = +$('num-photos').value || 0;
+  const exp = +$('exp-sec').value    || 0;
+  const ivl = +$('ivl-sec').value    || 0;
+  if (!n || !exp) { $('d-duration').innerHTML = '<small>Total time</small>—'; return; }
+  const total = n * exp + Math.max(0, n - 1) * ivl;
+  $('d-duration').innerHTML = `<small>Total time</small>${fmtDur(total)}`;
+  showSummary(n, exp, ivl, total);
+}
+
+function recalcET() {
+  const exp   = +$('exp-sec-et').value || 0;
+  const ivl   = +$('ivl-sec-et').value || 0;
+  const etVal = $('end-time').value;
+  if (!etVal || !exp) { $('d-count').innerHTML = '<small>Photos</small>—'; return; }
+  const avail = (new Date(etVal).getTime() - Date.now()) / 1000;
+  if (avail <= 0) { $('d-count').innerHTML = '<small>Photos</small>End time is in the past'; return; }
+  const n     = Math.max(1, Math.floor(avail / (exp + ivl)));
+  const total = n * exp + Math.max(0, n - 1) * ivl;
+  $('d-count').innerHTML = `<small>Photos</small>${n} captures`;
+  showSummary(n, exp, ivl, total);
+}
+
+function showSummary(n, exp, ivl, total) {
+  const el = $('sum-strip');
+  el.style.display = 'block';
+  el.textContent   = `${n} × ${exp}s exposures  ·  ${ivl}s interval  ·  ~${fmtDur(total)} total`;
+}
+
+// ── Health ──────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  const dot = $('hdr-dot');
+  dot.className = 'dot spin';
+  $('hdr-cam-status').textContent = 'checking…';
+  try {
+    const [status, data] = await api('GET', '/camera/health');
+    const ok = status === 200 && data.status === 'ok';
+    dot.className = 'dot ' + (ok ? 'ok' : 'err');
+    $('hdr-cam-name').textContent   = data.camera_model || '—';
+    $('hdr-cam-status').textContent = ok ? 'ready' : (data.status || 'error');
+    $('health-raw').textContent     = JSON.stringify(data, null, 2);
+  } catch (e) {
+    dot.className = 'dot err';
+    $('hdr-cam-status').textContent = 'unreachable';
+    $('health-raw').textContent = String(e);
+  }
+}
+
+async function fetchCaps() {
+  $('caps-raw').textContent = 'Loading…';
+  const [, data] = await api('GET', '/camera/capabilities');
+  $('caps-raw').textContent = JSON.stringify(data, null, 2);
+}
+
+async function doRecover() {
+  $('health-raw').textContent = 'Recovering…';
+  const [, data] = await api('POST', '/camera/recover');
+  $('health-raw').textContent = JSON.stringify(data, null, 2);
+  setTimeout(checkHealth, 800);
+}
+
+// ── Session ─────────────────────────────────────────────────────────────────
+let pollTimer = null;
+let uiTimer   = null;
+let lastData  = null;
+let expSeconds = 30;
+
+async function startSession() {
+  let n, exp, ivl;
+  if (mode === 'count') {
+    n   = +$('num-photos').value || 0;
+    exp = +$('exp-sec').value    || 0;
+    ivl = +$('ivl-sec').value    || 0;
+  } else {
+    exp = +$('exp-sec-et').value || 0;
+    ivl = +$('ivl-sec-et').value || 0;
+    const avail = (new Date($('end-time').value).getTime() - Date.now()) / 1000;
+    n = Math.max(1, Math.floor(avail / (exp + ivl)));
+  }
+  if (!n || !exp) { showErr('Enter a valid photo count and exposure time.'); return; }
+
+  expSeconds = exp;
+  clearErr();
+
+  const payload = {
+    num_photos:       n,
+    exposure_seconds: exp,
+    interval_seconds: ivl,
+    iso:              $('iso').value.trim(),
+    aperture:         $('aperture').value.trim(),
+    image_format:     $('img-fmt').value,
+    capture_target:   $('cap-tgt').value,
+    auto_recover:     $('auto-rec').value === 'true',
+  };
+
+  const [status, data] = await api('POST', '/session/start', payload);
+  if (status !== 200) { showErr(data.error || 'Failed to start session.'); return; }
+
+  $('settings-card').style.display = 'none';
+  $('prog-card').style.display     = 'block';
+  $('cancel-btn').disabled         = false;
+  $('new-btn').style.display       = 'none';
+  $('cap-log').innerHTML           = '<div class="log-empty">Waiting for first capture…</div>';
+
+  startPolling();
+}
+
+async function cancelSession() {
+  $('cancel-btn').disabled = true;
+  await api('POST', '/session/cancel');
+}
+
+function newSession() {
+  stopPolling();
+  $('prog-card').style.display     = 'none';
+  $('settings-card').style.display = 'block';
+  $('cancel-btn').disabled         = false;
+  $('new-btn').style.display       = 'none';
+}
+
+// ── Polling ─────────────────────────────────────────────────────────────────
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  if (uiTimer)   clearInterval(uiTimer);
+  pollTimer = setInterval(pollStatus, 1000);
+  uiTimer   = setInterval(tickUI,     250);
+  pollStatus();
+}
+
+function stopPolling() {
+  clearInterval(pollTimer); pollTimer = null;
+  clearInterval(uiTimer);   uiTimer   = null;
+}
+
+async function pollStatus() {
+  try {
+    const [, data] = await api('GET', '/session/status');
+    lastData = data;
+    renderStatus(data);
+  } catch (_) { /* ignore transient */ }
+}
+
+function renderStatus(d) {
+  const status  = d.status   || 'idle';
+  const done    = d.completed || 0;
+  const total   = d.total    || 0;
+  const pct     = total ? (done / total) * 100 : 0;
+  const elapsed = d.start_time ? (Date.now() / 1000 - d.start_time) : 0;
+  const errors  = (d.captures || []).filter(c => c.status === 'error').length;
+
+  // Count + bar
+  $('p-done').textContent  = done;
+  $('p-total').textContent = total;
+  $('pbar').style.width    = pct + '%';
+  $('pbar').classList.toggle('pulse', status === 'running');
+
+  // Badge
+  const badge = $('badge');
+  badge.className = `badge s-${status}`;
+  $('badge-txt').textContent = {
+    idle: 'Idle', running: 'Running', canceling: 'Canceling…',
+    done: 'Complete', canceled: 'Canceled', error: 'Error'
+  }[status] || status;
+
+  // Stats
+  const etaSec = done > 0 && total > done ? (elapsed / done) * (total - done) : null;
+  $('s-elapsed').textContent = fmtDur(elapsed);
+  $('s-eta').textContent     = etaSec != null ? fmtDur(etaSec) : '—';
+  $('s-finish').textContent  = etaSec != null ? fmtTime(Date.now() / 1000 + etaSec) : '—';
+  $('s-remain').textContent  = `${total - done}`;
+  $('s-errors').textContent  = errors;
+  $('s-errors').style.color  = errors > 0 ? 'var(--danger)' : 'var(--star)';
+
+  if (d.output_dir) $('outdir-val').textContent = d.output_dir;
+
+  // Log
+  if (d.captures && d.captures.length) {
+    $('cap-log').innerHTML = [...d.captures].reverse().map(c => {
+      const ok   = c.status === 'ok';
+      const name = ok ? (c.source_name || c.saved_path || '(saved)') : (c.error || 'error');
+      const t    = c.captured_at
+        ? new Date(c.captured_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : '';
+      return `<div class="log-row">
+        <span class="log-idx">#${String(c.index).padStart(3, '0')}</span>
+        <span class="${ok ? 'log-ok' : 'log-err'}">${ok ? '✓' : '✗'}</span>
+        <span class="log-name${ok ? '' : ' err'}">${esc(name)}</span>
+        <span class="log-time">${t}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // Terminal states
+  if (['done', 'canceled', 'error'].includes(status)) {
+    $('new-btn').style.display  = 'inline-flex';
+    $('cancel-btn').style.display = 'none';
+    stopPolling();
+    $('ring').style.strokeDashoffset = '163';
+    $('exp-phase').textContent = status === 'done' ? '✓ Complete' : '— Stopped';
+    $('exp-val').textContent   = '—';
+    $('exp-total').textContent = '';
+  }
+}
+
+// ── Exposure ring (fast UI tick) ─────────────────────────────────────────────
+function tickUI() {
+  if (!lastData) return;
+  const capStart = lastData.current_capture_start;
+  const status   = lastData.status;
+
+  if (!capStart || status !== 'running') {
+    $('exp-phase').textContent = status === 'running' ? '⏱ Interval' : 'Waiting';
+    $('exp-val').textContent   = status === 'running' ? '…' : '—';
+    $('exp-total').textContent = '';
+    $('ring').style.strokeDashoffset = '163';
+    return;
+  }
+
+  const elapsed   = Date.now() / 1000 - capStart;
+  const remaining = Math.max(0, expSeconds - elapsed);
+  const frac      = Math.min(1, elapsed / expSeconds);
+
+  $('exp-phase').textContent = '★ Exposing';
+  $('exp-val').textContent   = remaining.toFixed(1) + 's';
+  $('exp-total').textContent = `of ${expSeconds}s`;
+  $('ring').style.strokeDashoffset = 163 * (1 - frac);
+}
+
+// ── Utils ───────────────────────────────────────────────────────────────────
+function showErr(msg) {
+  const el = $('err-banner');
+  el.textContent  = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+function clearErr() { $('err-banner').style.display = 'none'; }
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // Default end-time to 2h from now
+  const et = new Date(Date.now() + 2 * 3600 * 1000);
+  $('end-time').value = et.toISOString().slice(0, 16);
+
+  checkHealth();
+  setInterval(checkHealth, 30_000);
+  recalc();
+});
+</script>
+</body>
+</html>
