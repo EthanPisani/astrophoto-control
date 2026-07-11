@@ -81,6 +81,8 @@
     teleElapsed: $("#teleElapsed"),
     teleEta: $("#teleEta"),
     teleExposure: $("#teleExposure"),
+    teleIso: $("#teleIso"),
+    teleInterval: $("#teleInterval"),
     teleErrors: $("#teleErrors"),
     lastCapture: $("#lastCapture"),
 
@@ -116,7 +118,7 @@
     isStarting: false,          // prevent double-start while request in flight
     confirmAction: null,        // "cancel" | "cancelAndNew" | null
     toastTimerId: 0,
-    countdownTimerId: 0,
+    liveTickerId: 0,            // single persistent local clock, independent of polling
   };
 
   // -----------------------------------------------------------------
@@ -142,8 +144,12 @@
 
   function formatLocalDateTime(isoString) {
     if (!isoString) return "—";
-    const cleaned = isoString.replace("Z", "");
-    const dt = new Date(cleaned);
+    // Only strings with a trailing "Z" are true UTC and must keep it so
+    // Date parses them as UTC (then converts to the browser's local
+    // timezone for display). Strings without "Z" (e.g. the server's
+    // `eta` field) are already naive server-local time and are parsed
+    // as local time as-is, which is correct.
+    const dt = new Date(isoString);
     if (Number.isNaN(dt.getTime())) return isoString;
     return dt.toLocaleString(undefined, {
       hour: "2-digit",
@@ -387,6 +393,19 @@
     }
   }
 
+  // Camera health touches real hardware (behind the gphoto2 bridge, which
+  // is effectively single-consumer), unlike /session/api/status which is
+  // just a DB read. Poll it on its own slow, independent cadence — not
+  // once per session-status poll — so any number of devices/tabs open at
+  // once don't multiply the rate of real hardware queries. (The server
+  // also short-circuits this entirely while a session is actively
+  // capturing, and caches it briefly otherwise, as extra insurance.)
+  const CAMERA_HEALTH_POLL_MS = 12000;
+  function startCameraHealthLoop() {
+    refreshCameraHealth();
+    setInterval(refreshCameraHealth, CAMERA_HEALTH_POLL_MS);
+  }
+
   function applyCameraHealth(payload) {
     if (!els.cameraPill) return;
     const cam = payload?.camera || {};
@@ -433,9 +452,10 @@
     const session = payload?.session || null;
     state.lastSession = session;
 
-    // camera pill
-    if (payload?.camera) applyCameraHealth(payload);
-    else refreshCameraHealth();
+    // Camera pill is refreshed on its own independent, slower cadence
+    // (see startCameraHealthLoop) — it's a separate, hardware-touching
+    // endpoint and shouldn't be re-queried on every single status poll
+    // from every open device just because a session is being watched.
 
     if (status === "idle" || !session) {
       // No active session: show the setup panel. This is what recovers
@@ -482,7 +502,6 @@
   function showSetup() {
     els.setupPanel?.classList.remove("hidden");
     els.activePanel?.classList.add("hidden");
-    stopExposureCountdown();
   }
 
   function showActive() {
@@ -537,19 +556,8 @@
   // Render: telemetry cells + current-exposure strip
   // -----------------------------------------------------------------
   function renderTelemetry(session, payload, status) {
-    // Elapsed
-    if (els.teleElapsed) {
-      const startedAt = session.started_at;
-      if (startedAt) {
-        const t0 = new Date(startedAt.replace("Z", "")).getTime();
-        const elapsed = Math.max(0, Math.floor((Date.now() - t0) / 1000));
-        els.teleElapsed.textContent = formatClock(elapsed);
-      } else {
-        els.teleElapsed.textContent = "—";
-      }
-    }
-
-    // ETA
+    // ETA — a point-in-time value from the server; only meaningful to
+    // refresh when a fresh poll comes in (no local interpolation needed).
     if (els.teleEta) {
       const eta = payload?.eta;
       if (eta) {
@@ -568,6 +576,18 @@
       els.teleExposure.textContent = sec > 0 ? `${sec}s` : "—";
     }
 
+    // ISO
+    if (els.teleIso) {
+      const iso = session.config?.iso;
+      els.teleIso.textContent = iso ? `${iso}` : "—";
+    }
+
+    // Interval between exposures
+    if (els.teleInterval) {
+      const intervalSec = Number(session.config?.interval_seconds) || 0;
+      els.teleInterval.textContent = intervalSec > 0 ? `${intervalSec}s` : "—";
+    }
+
     // Error count from DB captures
     if (els.teleErrors) {
       const errs = (payload.captures || []).filter((c) => c.status === "error").length;
@@ -575,8 +595,48 @@
       els.teleErrors.style.color = errs > 0 ? "var(--danger-bright)" : "";
     }
 
-    // Current-exposure mini-meter + countdown
+    // Elapsed + current-exposure mini-meter/countdown are driven by the
+    // persistent local ticker (tickLiveDisplay), not by poll cadence —
+    // render one immediate pass here too so there's no visible delay
+    // between a poll landing and the display reflecting it.
+    renderElapsed(session);
     renderExposureStrip(session, status);
+  }
+
+  // -----------------------------------------------------------------
+  // Live ticker — a single persistent local clock (started once at
+  // boot) that re-renders time-based UI every 250ms from whatever
+  // session/status we last received from the server. This is what
+  // makes the elapsed clock and exposure countdown animate smoothly
+  // *between* polls, instead of only updating once per poll response.
+  // -----------------------------------------------------------------
+  function tickLiveDisplay() {
+    const payload = state.lastStatus;
+    const session = state.lastSession;
+    const status = payload?.status;
+    if (!session || !status) return;
+
+    const isLive = status === "running" || status === "paused" || status === "canceling";
+    if (!isLive) return;
+
+    renderElapsed(session);
+    renderExposureStrip(session, status);
+  }
+
+  function renderElapsed(session) {
+    if (!els.teleElapsed) return;
+    const startedAt = session.started_at;
+    if (startedAt) {
+      // started_at is a true UTC timestamp (e.g. "...T14:15:00Z").
+      // Do NOT strip the "Z" — Date needs it to parse as UTC instead
+      // of local time, or the elapsed time comes out wrong (often
+      // negative, which then gets clamped to 0) for anyone not at UTC+0.
+      const t0 = new Date(startedAt).getTime();
+      const elapsed = Math.max(0, Math.floor((Date.now() - t0) / 1000));
+      els.teleElapsed.textContent = formatClock(elapsed);
+    } else {
+      els.teleElapsed.textContent = "—";
+    }
   }
 
   function renderExposureStrip(session, status) {
@@ -584,7 +644,8 @@
     const startedAt = session.current_capture_started_at;
 
     if (status === "running" && exposure > 0 && startedAt) {
-      const t0 = new Date(startedAt.replace("Z", "")).getTime();
+      // Same UTC-parsing rule as renderElapsed above.
+      const t0 = new Date(startedAt).getTime();
       const elapsed = Math.max(0, (Date.now() - t0) / 1000);
       const pct = Math.min(100, (elapsed / exposure) * 100);
       const remaining = Math.max(0, Math.ceil(exposure - elapsed));
@@ -592,9 +653,7 @@
       if (els.miniMeterFill) els.miniMeterFill.style.width = `${pct}%`;
       if (els.exposureCountdown)
         els.exposureCountdown.textContent = `${formatClock(remaining)} remaining`;
-      startExposureCountdown(() => renderExposureStrip(session, status));
     } else {
-      stopExposureCountdown();
       if (els.miniMeterFill) els.miniMeterFill.style.width = "0%";
       if (els.exposureCountdown) {
         if (status === "paused") els.exposureCountdown.textContent = "paused";
@@ -605,18 +664,6 @@
         else if (status === "error") els.exposureCountdown.textContent = "error";
         else els.exposureCountdown.textContent = "—";
       }
-    }
-  }
-
-  function startExposureCountdown(fn) {
-    stopExposureCountdown();
-    state.countdownTimerId = setInterval(fn, 250);
-  }
-
-  function stopExposureCountdown() {
-    if (state.countdownTimerId) {
-      clearInterval(state.countdownTimerId);
-      state.countdownTimerId = 0;
     }
   }
 
@@ -650,11 +697,14 @@
   // -----------------------------------------------------------------
   function renderErrorBanner(session) {
     if (!els.errorBanner) return;
-    if (session.error && (session.status === "error" || session.status === "canceled")) {
+    if (session.error) {
+      const isRecovering = session.error.startsWith("recovering from:");
+      els.errorBanner.classList.toggle("banner-warning", isRecovering);
       els.errorBanner.textContent = session.error;
       els.errorBanner.classList.remove("hidden");
     } else {
       els.errorBanner.classList.add("hidden");
+      els.errorBanner.classList.remove("banner-warning");
       els.errorBanner.textContent = "";
     }
   }
@@ -806,12 +856,8 @@
         const resp = await fetch("/session/api/status", { cache: "no-store" });
         const data = await resp.json();
         if (data.status === "idle" || !data.session) return;
-        if (data.session?.status &&
-            ["done", "canceled", "error", "complete"].includes(data.session.status)) {
-          // Even terminal sessions on the server still get reported via
-          // /status — we need to wait until the server *stops returning
-          // the session* (i.e. until `current_session()` returns null).
-          if (!data.session) return;
+        if (["done", "canceled", "error", "complete"].includes(data.session.status)) {
+          return;
         }
       } catch (_) { /* keep trying */ }
       await sleep(400);
@@ -831,6 +877,11 @@
       if (andStartNew) {
         await startSession();
       } else {
+        // The session now sits in a terminal ("canceled") state on the
+        // server and will keep being reported by /status until it's
+        // explicitly dismissed — otherwise the next poll would fetch it
+        // right back and flip the UI to the active panel again.
+        await postJson("/session/api/dismiss").catch(() => {});
         showSetup();
         await pollStatus();
       }
@@ -838,16 +889,18 @@
       showToast(e.message, "error");
       // Force-render the setup view regardless — the server may have
       // actually finished and the only thing stuck is our local view.
+      await postJson("/session/api/dismiss").catch(() => {});
       showSetup();
       await pollStatus();
     }
   }
 
   async function newSession() {
-    // Just bring the user back to the setup panel. The server may
-    // still hold a terminal session, but that's fine — the next
-    // start will be rejected with 409 if needed, and the user can
-    // adjust the form before pressing Start again.
+    // Tell the server we're done looking at the finished/errored session.
+    // Without this, the server keeps reporting it (by design, so the
+    // terminal panel can be shown) and the next background poll would
+    // fetch it right back and flip the UI back to the active panel.
+    await postJson("/session/api/dismiss").catch(() => {});
     showSetup();
     // Force a fresh estimate so the form is meaningful
     scheduleEstimate();
@@ -960,11 +1013,17 @@
     initButtons();
     syncScheduleModeFields();
     scheduleEstimate();
-    refreshCameraHealth();
+    startCameraHealthLoop();
     // Kick off the poll loop; the first response decides which panel
     // to show, which is how we recover from "stuck on canceling" or
     // from a previous tab leaving the UI in a half-broken state.
     pollStatus();
+    // Kick off the local live ticker once. It runs for the lifetime of
+    // the page and is a no-op whenever there's no live session, so it
+    // never needs to be started/stopped per-session or per-poll.
+    if (!state.liveTickerId) {
+      state.liveTickerId = setInterval(tickLiveDisplay, 250);
+    }
   }
 
   if (document.readyState === "loading") {

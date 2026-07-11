@@ -761,6 +761,88 @@ label.checkbox input { width: 15px; height: 15px; accent-color: var(--ember); }
    Plate Solve page
    ============================================================ */
 
+/* Split layout: image column + control column.
+   Mobile: image on top, controls below (stacked, normal scroll).
+   Desktop (≥900px): image fills the right side full-height,
+   controls are a fixed-width scrollable rail on the left. */
+
+.ps-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.image-col {
+  position: relative;
+  order: 1;
+  flex: 0 0 auto;
+  height: 42vh;
+  min-height: 240px;
+  background: var(--bg-inset);
+  border-bottom: 1px solid var(--line);
+}
+
+.control-col {
+  order: 2;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 20px 20px 100px;
+}
+
+@media (min-width: 900px) {
+  .ps-layout {
+    flex-direction: row;
+    height: 100vh;
+  }
+
+  .image-col {
+    order: 2;
+    flex: 1 1 auto;
+    height: 100vh;
+    min-height: 0;
+    border-bottom: none;
+    border-left: 1px solid var(--line);
+  }
+
+  .control-col {
+    order: 1;
+    flex: 0 0 420px;
+    max-width: 420px;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 24px 24px 48px;
+  }
+}
+
+@media (min-width: 1180px) {
+  .control-col { flex-basis: 460px; max-width: 460px; }
+}
+
+/* Image container fills its column completely — this is the
+   "full screen" pane, not a bordered card anymore. */
+.image-col .annotated-image-container {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--bg-inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.image-col .annotated-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.image-col .image-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
 /* Back link in topbar */
 .back-link {
   display: flex;

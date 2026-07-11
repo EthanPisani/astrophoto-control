@@ -26,6 +26,10 @@
         <span class="nv-toggle-track"><span class="nv-toggle-thumb"></span></span>
         <span class="nv-toggle-label">Night Vision</span>
       </button>
+      <a href="{{ url_for('platesolve_page') }}" class="back-link" title="Plate Solve &amp; Annotate">
+        <span class="nav-icon">⊞</span>
+        <span class="back-label">Plate Solve</span>
+      </a>
     </div>
   </header>
 
@@ -85,6 +89,7 @@
               <label for="iso">ISO</label>
               <select id="iso" name="iso">
                 <option>100</option>
+                <option>125</option>
                 <option>200</option>
                 <option selected>400</option>
                 <option>800</option>
@@ -227,6 +232,14 @@
         <div class="tele-cell">
           <div class="tele-label">Exposure</div>
           <div class="tele-value" id="teleExposure">—</div>
+        </div>
+        <div class="tele-cell">
+          <div class="tele-label">ISO</div>
+          <div class="tele-value" id="teleIso">—</div>
+        </div>
+        <div class="tele-cell">
+          <div class="tele-label">Interval</div>
+          <div class="tele-value" id="teleInterval">—</div>
         </div>
         <div class="tele-cell">
           <div class="tele-label">Errors</div>
