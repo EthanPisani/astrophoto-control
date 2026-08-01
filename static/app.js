@@ -45,6 +45,11 @@
     setupForm: $("#setupForm"),
     sessionName: $("#sessionName"),
     seqGrid: $("#seqGrid"),
+    fieldShutterPreset: $("#fieldShutterPreset"),
+    shutterPreset: $("#shutterPreset"),
+    fieldAutoFlatExposure: $("#fieldAutoFlatExposure"),
+    autoFlatExposureBtn: $("#autoFlatExposureBtn"),
+    autoFlatExposureStatus: $("#autoFlatExposureStatus"),
     exposureSeconds: $("#exposureSeconds"),
     intervalSeconds: $("#intervalSeconds"),
     iso: $("#iso"),
@@ -165,6 +170,42 @@
     ));
   }
 
+  // Fastest shutter speed we accept — matches the D5300 (and most
+  // consumer DSLRs) top electronic/mechanical shutter speed. Keep in
+  // sync with MIN_EXPOSURE_SECONDS in app.py.
+  const MIN_EXPOSURE_SECONDS = 1 / 4000;
+
+  // Parses an exposure value that may be a plain decimal ("0.25"), a
+  // whole number ("240"), or photographic fraction notation ("1/4000"),
+  // which is how fast bias-frame shutter speeds get entered.
+  function parseExposureInput(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return 0;
+    if (text.includes("/")) {
+      const [numStr, denStr] = text.split("/", 2);
+      const num = Number(numStr);
+      const den = Number(denStr);
+      if (!Number.isFinite(num) || !Number.isFinite(den) || den === 0) return 0;
+      return num / den;
+    }
+    const val = Number(text);
+    return Number.isFinite(val) ? val : 0;
+  }
+
+  // Renders an exposure duration the way a photographer would expect to
+  // read it: fraction notation under 1s ("1/4000s"), otherwise seconds.
+  function formatExposureSeconds(seconds) {
+    const sec = Number(seconds) || 0;
+    if (sec <= 0) return "—";
+    if (sec >= 1) {
+      // Trim trailing zeros on decimals (e.g. "4.50" -> "4.5").
+      const trimmed = Number(sec.toFixed(3)).toString();
+      return `${trimmed}s`;
+    }
+    const denominator = Math.round(1 / sec);
+    return `1/${denominator}s`;
+  }
+
   // -----------------------------------------------------------------
   // Toast notifications
   // -----------------------------------------------------------------
@@ -201,6 +242,16 @@
   // -----------------------------------------------------------------
   // Sequence-type selector (lights / flats / biases / darks)
   // -----------------------------------------------------------------
+  // Sensible default exposure when switching into a frame type, but only
+  // if the user hasn't already typed something for that type — we don't
+  // want to stomp on a value someone is mid-edit on.
+  const SEQ_DEFAULT_EXPOSURE = {
+    lights: "240",
+    darks: "240",
+    flats: "0.01",
+    biases: "1/4000",
+  };
+
   function initSequenceButtons() {
     if (!els.seqGrid) return;
     const buttons = els.seqGrid.querySelectorAll(".seq-btn");
@@ -208,13 +259,111 @@
       btn.addEventListener("click", () => {
         const seq = btn.getAttribute("data-seq");
         if (!seq) return;
+        const previousSeq = state.sequenceType;
         state.sequenceType = seq;
         buttons.forEach((b) =>
           b.setAttribute("aria-pressed", b === btn ? "true" : "false")
         );
+        syncShutterPresetVisibility();
+        // Biases are always shot at a fixed fast shutter speed, so jump
+        // straight to the currently-selected preset. For other frame
+        // types, only apply the default if the field still holds the
+        // default for the type we're leaving (i.e. the user hasn't
+        // customized it).
+        if (seq === "biases") {
+          applyShutterPreset(els.shutterPreset?.value || "1/4000");
+        } else if (
+          els.exposureSeconds &&
+          (els.exposureSeconds.value === "" ||
+            els.exposureSeconds.value === SEQ_DEFAULT_EXPOSURE[previousSeq])
+        ) {
+          els.exposureSeconds.value = SEQ_DEFAULT_EXPOSURE[seq] || els.exposureSeconds.value;
+        }
         scheduleEstimate();
       });
     });
+  }
+
+  function syncShutterPresetVisibility() {
+    if (els.fieldShutterPreset) {
+      els.fieldShutterPreset.classList.toggle("hidden", state.sequenceType !== "biases");
+    }
+    if (els.fieldAutoFlatExposure) {
+      els.fieldAutoFlatExposure.classList.toggle("hidden", state.sequenceType !== "flats");
+    }
+  }
+
+  // Applies a shutter-speed preset to both the exposure field (so
+  // scheduling math works) and the advanced shutter-speed override (so
+  // the camera actually uses its own fast shutter instead of a bulb
+  // hold). "custom" leaves the exposure field alone for manual entry.
+  function applyShutterPreset(value) {
+    if (value === "custom") return;
+    if (els.exposureSeconds) els.exposureSeconds.value = value;
+    if (els.shutterSpeed) els.shutterSpeed.value = value;
+  }
+
+  function initShutterPreset() {
+    if (!els.shutterPreset) return;
+    els.shutterPreset.addEventListener("change", () => {
+      applyShutterPreset(els.shutterPreset.value);
+      scheduleEstimate();
+    });
+  }
+
+  // -----------------------------------------------------------------
+  // Flats: auto exposure via histogram bisection
+  // -----------------------------------------------------------------
+  function initAutoFlatExposure() {
+    if (!els.autoFlatExposureBtn) return;
+    els.autoFlatExposureBtn.addEventListener("click", runAutoFlatExposure);
+  }
+
+  async function runAutoFlatExposure() {
+    if (!els.autoFlatExposureBtn) return;
+    els.autoFlatExposureBtn.disabled = true;
+    const originalLabel = els.autoFlatExposureBtn.textContent;
+    els.autoFlatExposureBtn.textContent = "Metering…";
+    if (els.autoFlatExposureStatus) {
+      els.autoFlatExposureStatus.textContent = "Taking test shots — this can take a minute…";
+    }
+
+    try {
+      const resp = await fetch("/session/api/auto_flat_exposure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_fraction: 1 / 3,
+          start_exposure: parseExposureInput(els.exposureSeconds?.value) || 1,
+          iso: els.iso?.value || "400",
+          aperture: (els.aperture?.value || "").trim() || null,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.error) {
+        throw new Error(data.error || `calibration failed (${resp.status})`);
+      }
+
+      if (els.exposureSeconds) els.exposureSeconds.value = String(data.exposure_seconds);
+      if (els.shutterSpeed) els.shutterSpeed.value = data.shutter_speed || "bulb";
+
+      const pct = Math.round((data.peak_fraction || 0) * 100);
+      if (els.autoFlatExposureStatus) {
+        els.autoFlatExposureStatus.textContent = data.converged
+          ? `Converged in ${data.iterations} shots — histogram peak at ${pct}% (target 33%).`
+          : `Stopped after ${data.iterations} shots — closest peak at ${pct}% (target 33%). You can nudge exposure manually.`;
+      }
+      showToast(`Auto exposure: ${formatExposureSeconds(data.exposure_seconds)}`, data.converged ? "ok" : "info");
+      scheduleEstimate();
+    } catch (err) {
+      if (els.autoFlatExposureStatus) {
+        els.autoFlatExposureStatus.textContent = `⚠ ${err.message || err}`;
+      }
+      showToast(`Auto exposure failed: ${err.message || err}`, "error");
+    } finally {
+      els.autoFlatExposureBtn.disabled = false;
+      els.autoFlatExposureBtn.textContent = originalLabel;
+    }
   }
 
   // -----------------------------------------------------------------
@@ -274,7 +423,7 @@
       session_name: (els.sessionName?.value || "").trim(),
       sequence_type: state.sequenceType,
       mode: state.mode,
-      exposure_seconds: parseInt(els.exposureSeconds?.value || "0", 10) || 0,
+      exposure_seconds: parseExposureInput(els.exposureSeconds?.value),
       interval_seconds: parseInt(els.intervalSeconds?.value || "0", 10) || 0,
       iso: els.iso?.value || null,
       aperture: (els.aperture?.value || "").trim() || null,
@@ -298,7 +447,9 @@
 
   function validateFormConfig(cfg) {
     if (!cfg.session_name) return "Session name is required.";
-    if (cfg.exposure_seconds < 1) return "Exposure must be at least 1 second.";
+    if (cfg.exposure_seconds <= 0) return "Exposure must be greater than 0 seconds.";
+    if (cfg.exposure_seconds < MIN_EXPOSURE_SECONDS)
+      return "Exposure can't be faster than the camera's fastest shutter speed (1/4000s).";
     if (cfg.interval_seconds < 0) return "Interval must be 0 or greater.";
     if (cfg.mode === "count") {
       if (!cfg.num_photos || cfg.num_photos < 1)
@@ -371,7 +522,7 @@
       // Fixed count → tell them when it ends
       els.estimate.innerHTML = `
         <span>${state.sequenceType}:</span>
-        <span><span class="val">${numPhotos}</span> photos × <span class="val">${cfg.exposure_seconds}s</span></span>
+        <span><span class="val">${numPhotos}</span> photos × <span class="val">${formatExposureSeconds(cfg.exposure_seconds)}</span></span>
         <span>•</span>
         <span>~<span class="val">${formatHMS(duration)}</span> total</span>
         <span>•</span>
@@ -573,7 +724,7 @@
     // Exposure per frame
     if (els.teleExposure) {
       const sec = Number(session.config?.exposure_seconds) || 0;
-      els.teleExposure.textContent = sec > 0 ? `${sec}s` : "—";
+      els.teleExposure.textContent = sec > 0 ? formatExposureSeconds(sec) : "—";
     }
 
     // ISO
@@ -642,6 +793,16 @@
   function renderExposureStrip(session, status) {
     const exposure = Number(session.config?.exposure_seconds) || 0;
     const startedAt = session.current_capture_started_at;
+
+    // Sub-second exposures (bias frames) finish faster than any
+    // meaningful UI countdown could track, so just show a static
+    // "capturing" state instead of a misleading/flickering timer.
+    if (status === "running" && exposure > 0 && exposure < 1 && startedAt) {
+      if (els.miniMeterFill) els.miniMeterFill.style.width = "100%";
+      if (els.exposureCountdown)
+        els.exposureCountdown.textContent = `capturing (${formatExposureSeconds(exposure)})`;
+      return;
+    }
 
     if (status === "running" && exposure > 0 && startedAt) {
       // Same UTC-parsing rule as renderElapsed above.
@@ -1008,6 +1169,9 @@
   function init() {
     initNightVision();
     initSequenceButtons();
+    initShutterPreset();
+    initAutoFlatExposure();
+    syncShutterPresetVisibility();
     initModeSegmented();
     initFormInputs();
     initButtons();

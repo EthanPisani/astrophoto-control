@@ -23,11 +23,13 @@ from flask import Flask, jsonify, render_template, request, send_file, url_for
 # Import plate solving module (creates background tasks)
 import platesolve
 import siril_annotate
+import auto_flat_exposure
 use_siril_backend = False
  
-GPHOTO_API_BASE = os.environ.get("GPHOTO_API_BASE", "http://localhost:8080").rstrip("/")
+GPHOTO_API_BASE = os.environ.get("GPHOTO_API_BASE", "http://10.0.0.69:8080").rstrip("/")
 OUTPUT_BASE_DIR = Path(os.environ.get("ASTROCAP_OUTDIR", "./captures"))
 SESSIONS_BASE_DIR = OUTPUT_BASE_DIR / "sessions"
+CALIBRATION_DIR = OUTPUT_BASE_DIR / "calibration"
 DB_PATH = Path(os.environ.get("ASTROCAP_DB_PATH", str(OUTPUT_BASE_DIR / "astrocap.db")))
 SERVER_PORT = int(os.environ.get("ASTROCAP_PORT", 7777))
 HTTP_TIMEOUT = int(os.environ.get("ASTROCAP_HTTP_TIMEOUT", 20))
@@ -526,7 +528,7 @@ class SessionManager:
             return False
  
     def _run_session(self, session_id: str, config: dict[str, Any], output_dir: Path, total: int) -> None:
-        exposure_seconds = int(config["exposure_seconds"])
+        exposure_seconds = float(config["exposure_seconds"])
         interval_seconds = int(config["interval_seconds"])
         capture_body = build_capture_request(config)
         auto_recover = bool(config.get("auto_recover_usb"))
@@ -740,9 +742,12 @@ class SessionManager:
                 self._active_session_id = None
  
     def _wait_for_capture(
-        self, capture_id: str, exposure_seconds: int,
+        self, capture_id: str, exposure_seconds: float,
         session_id: Optional[str] = None, seq: Optional[int] = None,
     ) -> dict[str, Any]:
+        # exposure_seconds may be a fraction of a second (bias frames can
+        # be as fast as 1/4000s) — the 90s floor dominates for anything
+        # short, so there's no need for special-casing here.
         timeout = max(90, exposure_seconds * 2 + 60)
         deadline = time.time() + timeout
         cancel_sent = False
@@ -772,6 +777,54 @@ def parse_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+# Fastest shutter speed we'll accept from the UI. 1/4000s is the fastest
+# mechanical/electronic shutter speed on the D5300 (and most consumer
+# DSLRs), so bias frames bottom out here.
+MIN_EXPOSURE_SECONDS = 1 / 4000
+
+
+def parse_float(value: Any, default: float = 0.0) -> float:
+    """Parse a numeric exposure value that may arrive as a plain decimal
+    ("0.25"), a whole number ("240"), or photographic fraction notation
+    ("1/4000"). Fraction notation is what the setup form sends for fast
+    bias-frame shutter speeds."""
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    if "/" in text:
+        num, _, den = text.partition("/")
+        try:
+            num_f = float(num.strip())
+            den_f = float(den.strip())
+            if den_f == 0:
+                return default
+            return num_f / den_f
+        except ValueError:
+            return default
+    try:
+        return float(text)
+    except ValueError:
+        return default
+
+
+def format_shutter_speed(seconds: float) -> str:
+    """Render an exposure duration as the string a camera's shutterspeed
+    config expects: whole/decimal seconds for anything >= 1s ("4",
+    "2.5"), and photographic fraction notation for anything faster
+    ("1/4000")."""
+    if seconds >= 1:
+        # Trim trailing ".0" for whole-second values.
+        return f"{seconds:g}"
+    if seconds <= 0:
+        return "1/4000"
+    denominator = round(1 / seconds)
+    return f"1/{denominator}"
  
  
 def utc_now_iso() -> str:
@@ -909,13 +962,15 @@ def maybe_make_thumbnail(source_path: Path, thumbs_dir: Path) -> Optional[Path]:
 def estimate_schedule(
     mode: str,
     now_epoch: float,
-    exposure_seconds: int,
+    exposure_seconds: float,
     interval_seconds: int,
     num_photos: Optional[int],
     target_end_time: Optional[str],
 ) -> dict[str, Any]:
     if exposure_seconds <= 0:
         raise AstroError("exposure_seconds must be greater than zero")
+    if exposure_seconds < MIN_EXPOSURE_SECONDS:
+        raise AstroError("exposure_seconds is faster than the camera's fastest shutter speed (1/4000s)")
     if interval_seconds < 0:
         raise AstroError("interval_seconds must be zero or greater")
  
@@ -936,7 +991,7 @@ def estimate_schedule(
         return {
             "mode": "end_time",
             "num_photos": achievable,
-            "estimated_duration_s": duration,
+            "estimated_duration_s": round(duration, 3),
             "estimated_end": datetime.fromtimestamp(now_epoch + duration).isoformat(timespec="seconds"),
             "target_end": dt.isoformat(timespec="seconds"),
         }
@@ -949,19 +1004,46 @@ def estimate_schedule(
     return {
         "mode": "count",
         "num_photos": count,
-        "estimated_duration_s": duration,
+        "estimated_duration_s": round(duration, 3),
         "estimated_end": datetime.fromtimestamp(now_epoch + duration).isoformat(timespec="seconds"),
         "target_end": None,
     }
  
  
 def build_capture_request(config: dict[str, Any]) -> dict[str, Any]:
+    exposure_seconds = float(config["exposure_seconds"])
+    shutter_speed = (config.get("shutter_speed") or "").strip()
+
+    # Below 1 second we're outside what a software-timed "bulb" hold can
+    # reliably hit (USB round-trip latency alone can be tens of ms), so
+    # sub-second exposures — bias frames in particular, down to 1/4000s —
+    # need the camera's own electronic/mechanical shutter timing instead.
+    # If the caller didn't explicitly pick a shutter speed, derive one
+    # from the requested exposure whenever it's sub-second; otherwise
+    # keep defaulting to "bulb" for normal long-exposure lights/darks.
+    if not shutter_speed or shutter_speed.lower() == "bulb":
+        if exposure_seconds < 1:
+            shutter_speed = format_shutter_speed(exposure_seconds)
+        else:
+            shutter_speed = shutter_speed or "bulb"
+
+    is_bulb = shutter_speed.lower() == "bulb"
+
     payload: dict[str, Any] = {
-        "shutter_speed": config.get("shutter_speed") or "bulb",
-        "exposure_seconds": int(config["exposure_seconds"]),
+        "shutter_speed": shutter_speed,
         "capture_target": config.get("capture_target") or "sdram",
     }
- 
+
+    # nikon_bulb_server's CaptureRequest.exposure_seconds is a nullable
+    # *integer* (int64) — it's only meaningful as the hold duration for
+    # a software-timed bulb capture. For a real (non-bulb) shutter speed
+    # like "1/4000", the camera's own shutterspeed setting controls the
+    # exposure and this field must be omitted; sending a fractional
+    # value here would fail to deserialize on the Rust side, and sending
+    # an integer would be misread as an actual bulb-hold duration.
+    if is_bulb:
+        payload["exposure_seconds"] = max(1, round(exposure_seconds))
+
     optional_fields = [
         "iso"
     ]
@@ -974,8 +1056,50 @@ def build_capture_request(config: dict[str, Any]) -> dict[str, Any]:
         payload["iso"] = str(payload["iso"])
  
     return payload
- 
- 
+
+
+def _capture_single_test_frame(
+    exposure_seconds: float,
+    iso: str = "400",
+    aperture: Optional[str] = None,
+) -> Path:
+    """Takes one throwaway capture directly via the NikonApiClient,
+    bypassing SessionManager entirely — this is a metering shot for
+    flat-exposure calibration, not a frame that belongs in a session
+    (no DB row, no seq number, no place in the gallery)."""
+    config = {
+        "exposure_seconds": exposure_seconds,
+        "shutter_speed": "bulb",
+        "capture_target": "sdram",
+        "iso": iso,
+        "aperture": aperture,
+    }
+    body = build_capture_request(config)
+    accepted = api_client.create_capture(body)
+    capture_id = str(accepted.get("capture_id") or "")
+    if not capture_id:
+        raise AstroError("backend did not return capture_id for calibration shot")
+
+    timeout = max(30, exposure_seconds * 2 + 20)
+    deadline = time.time() + timeout
+    record: dict[str, Any] = {}
+    while time.time() < deadline:
+        record = api_client.get_capture(capture_id)
+        if record.get("status") in TERMINAL_CAPTURE_STATES:
+            break
+        time.sleep(0.25)
+    else:
+        raise AstroError(f"calibration capture {capture_id} timed out")
+
+    if record.get("status") != "complete":
+        raise AstroError(record.get("error") or f"calibration capture ended with status: {record.get('status')}")
+
+    CALIBRATION_DIR.mkdir(parents=True, exist_ok=True)
+    dest_path = CALIBRATION_DIR / f"{capture_id}.nef"
+    api_client.download_capture_file(capture_id, dest_path)
+    return dest_path
+
+
 def disk_stats(path: Path) -> dict[str, Any]:
     usage = shutil.disk_usage(path)
     captures_total = 0
@@ -1012,7 +1136,7 @@ def session_estimate() -> tuple[Any, int] | Any:
         estimate = estimate_schedule(
             mode=mode,
             now_epoch=time.time(),
-            exposure_seconds=parse_int(data.get("exposure_seconds"), 0),
+            exposure_seconds=parse_float(data.get("exposure_seconds"), 0),
             interval_seconds=parse_int(data.get("interval_seconds"), 0),
             num_photos=parse_int(data.get("num_photos"), 0),
             target_end_time=data.get("target_end_time"),
@@ -1029,7 +1153,7 @@ def session_start() -> tuple[Any, int] | Any:
     session_name = (data.get("session_name") or "").strip()
     sequence_type = (data.get("sequence_type") or "lights").strip().lower()
     mode = (data.get("mode") or "count").strip().lower()
-    exposure_seconds = parse_int(data.get("exposure_seconds"), 0)
+    exposure_seconds = parse_float(data.get("exposure_seconds"), 0)
     interval_seconds = parse_int(data.get("interval_seconds"), 0)
  
     if not session_name:
@@ -1110,6 +1234,56 @@ def session_stop() -> tuple[Any, int] | Any:
 def session_dismiss() -> Any:
     session_manager.dismiss()
     return jsonify({"ok": True})
+ 
+ 
+@app.route("/session/api/auto_flat_exposure", methods=["POST"])
+def session_auto_flat_exposure() -> tuple[Any, int] | Any:
+    """Bisects exposure time on live test shots until the combined
+    R+G+B histogram peak lands at target_fraction (default 1/3) of the
+    sensor's full range. Only exposure time changes — ISO/aperture are
+    held fixed at whatever the setup form currently has. Returns the
+    resolved exposure so the frontend can drop it straight into the
+    exposure field before starting the real flats session."""
+    if session_manager.active_session_id():
+        return jsonify({"error": "cannot calibrate while a session is running"}), 409
+
+    data = request.get_json(silent=True) or {}
+    target_fraction = float(data.get("target_fraction") or (1 / 3))
+    start_exposure = parse_float(data.get("start_exposure"), 1.0)
+    iso = str(data.get("iso") or "400")
+    aperture = data.get("aperture")
+
+    if not (0 < target_fraction < 1):
+        return jsonify({"error": "target_fraction must be between 0 and 1"}), 400
+
+    def capture_fn(exposure_seconds: float) -> Path:
+        return _capture_single_test_frame(exposure_seconds, iso=iso, aperture=aperture)
+
+    try:
+        result = auto_flat_exposure.bisect_flat_exposure(
+            capture_fn,
+            target_fraction=target_fraction,
+            start_exposure=start_exposure,
+            min_exposure=MIN_EXPOSURE_SECONDS,
+        )
+    except AstroError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except Exception as exc:  # noqa: BLE001 — rawpy/camera failures, keep the caller informed
+        log.exception("auto_flat_exposure failed")
+        return jsonify({"error": f"calibration failed: {exc}"}), 502
+
+    return jsonify({
+        "ok": True,
+        "converged": result.converged,
+        "iterations": result.iterations,
+        "exposure_seconds": result.exposure_seconds,
+        "shutter_speed": format_shutter_speed(result.exposure_seconds),
+        "peak_fraction": result.peak_fraction,
+        "target_fraction": target_fraction,
+        "history": [
+            {"exposure_seconds": e, "peak_fraction": f} for e, f in result.history
+        ],
+    })
  
  
 @app.route("/session/api/status")

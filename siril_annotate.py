@@ -3,6 +3,7 @@ import os
 import sys
 import re
 import csv
+import shutil
 
 # Third-party astronomy dependencies
 try:
@@ -124,6 +125,47 @@ _DSO_SOURCE = os.environ.get("ASTROCAP_DSO_SOURCE", "vizier").strip().lower()
 _VIZIER_NGC_CATALOG = "VII/118/ngc2000"
 _VIZIER_SH2_CATALOG = "VII/20/catalog"
 _VIZIER_LDN_CATALOG = "VII/7A/ldn"
+
+
+@dataclass(frozen=True)
+class SirilRuntime:
+    name: str
+    command: tuple[str, ...]
+
+
+def _detect_siril_runtime() -> SirilRuntime:
+    siril_cli = shutil.which("siril-cli")
+    if siril_cli:
+        return SirilRuntime(
+            name=f"Debian/package install ({siril_cli})",
+            command=(siril_cli,),
+        )
+
+    flatpak = shutil.which("flatpak")
+    if flatpak:
+        try:
+            probe = subprocess.run(
+                [flatpak, "info", "org.siril.Siril"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if probe.returncode == 0:
+                return SirilRuntime(
+                    name="Flatpak (org.siril.Siril)",
+                    command=(flatpak, "run", "--command=siril-cli", "org.siril.Siril"),
+                )
+        except Exception:
+            pass
+
+    return SirilRuntime(name="unavailable", command=())
+
+
+_SIRIL_RUNTIME = _detect_siril_runtime()
+if _SIRIL_RUNTIME.command:
+    print(f"[*] Detected Siril runtime: {_SIRIL_RUNTIME.name}")
+else:
+    print("[-] Siril runtime not found. Install siril-cli or the Flatpak app org.siril.Siril.")
 
 log = logging.getLogger("siril_annotate")
 
@@ -708,8 +750,6 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
     caller can compute field-of-view size and propagate the DSO list —
     previously these were computed here and then discarded.
     """
-    import numpy as np
-    import csv
     print(f"[*] Correcting RAW color channels and sky background...")
 
     # 1. Read raw image matrix with customized processing profiles
@@ -754,41 +794,11 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
 
     search_radius = (max(img_width, img_height) * pixel_scale_deg) / 2.0
 
-    catalog_dir = "/var/lib/flatpak/app/org.siril.Siril/current/active/files/share/siril/catalogue"
-    if not os.path.exists(catalog_dir):
-        catalog_dir = os.path.abspath(".")
-
-    catalog_files = ['messier.csv', 'ngc.csv', 'ic.csv', 'sh2.csv', 'ldn.csv', 'stars.csv']
-    local_objects = []
-
-    for cat_file in catalog_files:
-        full_path = os.path.join(catalog_dir, cat_file)
-        if not os.path.exists(full_path):
-            continue
-
-        with open(full_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    obj_name = row['name'].strip()
-                    ra_deg = float(row['ra'])
-                    dec_deg = float(row['dec'])
-
-                    raw_diameter = row.get('diameter', '0')
-                    diameter_arcmin = float(raw_diameter) if raw_diameter.strip() else 0.0
-
-                    obj_coord = SkyCoord(ra_deg, dec_deg, unit=(u.deg, u.deg))
-                    separation = center_coord.separation(obj_coord).deg
-
-                    if separation <= search_radius:
-                        local_objects.append({
-                            'name': obj_name,
-                            'coord': obj_coord,
-                            'diameter_arcmin': diameter_arcmin,
-                            'is_star_or_neb': ('stars' in cat_file or 'sh2' in cat_file or 'ldn' in cat_file)
-                        })
-                except (ValueError, KeyError):
-                    continue
+    local_objects = query_dso_catalogues(
+        center_coord.ra.deg,
+        center_coord.dec.deg,
+        search_radius,
+    )
 
     fig, ax = plt.subplots(figsize=(12, 8), dpi=150, facecolor='black')
     try:
@@ -799,7 +809,8 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
         cos_t, sin_t = np.cos(theta), np.sin(theta)
 
         for obj in local_objects:
-            dra, ddec = center_coord.spherical_offsets_to(obj['coord'])
+            obj_coord = SkyCoord(ra=obj.ra, dec=obj.dec, unit=u.deg)
+            dra, ddec = center_coord.spherical_offsets_to(obj_coord)
 
             dx_raw = -dra.deg / pixel_scale_deg
             dy_raw = ddec.deg / pixel_scale_deg
@@ -811,21 +822,21 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
             y_pix = (img_height / 2.0) - dy_rotated
 
             if 0 <= x_pix < img_width and 0 <= y_pix < img_height:
-                layer_color = '#e74c3c' if obj['is_star_or_neb'] else '#e67e22'
+                layer_color = '#e74c3c' if obj.obj_type == "star" else '#e67e22'
 
-                if obj['diameter_arcmin'] > 0:
-                    diameter_arcsec = obj['diameter_arcmin'] * 60.0
+                if obj.diameter_arcmin > 0:
+                    diameter_arcsec = obj.diameter_arcmin * 60.0
                     marker_radius_pixels = (diameter_arcsec / half_size_scale) / 2.0
                     if marker_radius_pixels < 12:
                         marker_radius_pixels = 12
                 else:
-                    marker_radius_pixels = 15 if obj['is_star_or_neb'] else 25
+                    marker_radius_pixels = 15 if obj.obj_type == "star" else 25
 
                 circle = plt.Circle((x_pix, y_pix), radius=marker_radius_pixels, color=layer_color,
                                      fill=False, linewidth=1.1, alpha=0.8)
                 ax.add_patch(circle)
 
-                ax.text(x_pix + (marker_radius_pixels + 4), y_pix, obj['name'], color=layer_color,
+                ax.text(x_pix + (marker_radius_pixels + 4), y_pix, obj.name, color=layer_color,
                         fontsize=7, weight='bold',
                         bbox=dict(facecolor='#111111', alpha=0.5, edgecolor='none', pad=1))
 
@@ -864,10 +875,14 @@ close
         f.write(siril_script_content)
 
     print(f"[*] Generated temporary script file at: {script_file_path}")
-    print(f"[*] Executing isolated plate solve via Flatpak...")
 
-    flatpak_args = ['flatpak', 'run', '--command=siril-cli', 'org.siril.Siril', '-s', script_file_path]
-    process = subprocess.Popen(flatpak_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    if not _SIRIL_RUNTIME.command:
+        raise RuntimeError("Siril runtime not found. Install siril-cli or the Flatpak app org.siril.Siril.")
+
+    print(f"[*] Executing isolated plate solve via {_SIRIL_RUNTIME.name}...")
+
+    siril_args = [*_SIRIL_RUNTIME.command, '-s', script_file_path]
+    process = subprocess.Popen(siril_args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
     captured_logs = []
     solved_successfully = False
@@ -931,16 +946,7 @@ close
         field_width_arcmin = (img_width * half_size_scale) / 60.0
         field_height_arcmin = (img_height * half_size_scale) / 60.0
 
-        dso_annotations = [
-            DsoAnnotation(
-                name=obj['name'],
-                obj_type="star" if obj['is_star_or_neb'] else "Gx",
-                ra=float(obj['coord'].ra.deg),
-                dec=float(obj['coord'].dec.deg),
-                diameter_arcmin=obj['diameter_arcmin'],
-            )
-            for obj in local_objects
-        ]
+        dso_annotations = local_objects
 
         wcs_metadata["ra_deg"] = solved_ra_deg
         wcs_metadata["dec_deg"] = solved_dec_deg
