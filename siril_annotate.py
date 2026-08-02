@@ -88,25 +88,20 @@ _LOCAL_CAT_PATH = os.path.expanduser(
 )
 
 # Local DSO/star catalogue CSVs used for field annotation — the same plain
-# CSV files Siril ships (messier.csv, ngc.csv, ic.csv, sh2.csv, ldn.csv,
-# stars.csv), read directly. No Siril installation or flatpak path required;
-# point this at wherever you keep those six files. Only used if
-# ASTROCAP_DSO_SOURCE=csv (see below) — the default is "vizier", which needs
-# no extracted files at all.
+# CSV files Siril ships (ngc.csv, ic.csv), read directly. No Siril
+# installation or flatpak path required; point this at wherever you keep
+# those files. Only used if ASTROCAP_DSO_SOURCE=csv (see below) — the
+# default is "vizier", which needs no extracted files at all.
 _DSO_CATALOG_DIR = Path(os.path.expanduser(
     os.environ.get("ASTROCAP_DSO_CATALOG_DIR", "~/src/sc-data/catalogs/siril")
 ))
 
-# (filename, is_star_like) — is_star_like drives the red/orange colour split,
-# matching siril_annotate.py's `'stars' in cat_file or 'sh2' in cat_file or
-# 'ldn' in cat_file` rule. Only used in "csv" mode.
-_DSO_CATALOG_FILES: list[tuple[str, bool]] = [
-    ("messier.csv", False),
-    ("ngc.csv", False),
-    ("ic.csv", False),
-    ("sh2.csv", True),
-    ("ldn.csv", True),
-    ("stars.csv", True),
+# (filename, catalog_kind) — catalog_kind drives the colour split.
+# The LDN layer is intentionally excluded because it obscures the chart
+# instead of helping with bearings.
+_DSO_CATALOG_FILES: list[tuple[str, str]] = [
+    ("ngc.csv", "ngc"),
+    ("ic.csv", "ic"),
 ]
 
 # "vizier" (default): query the same catalogues Siril's are built from,
@@ -123,6 +118,7 @@ _DSO_SOURCE = os.environ.get("ASTROCAP_DSO_SOURCE", "vizier").strip().lower()
 # Messier isn't its own VizieR catalogue — it's resolved live via SIMBAD
 # (M1..M110), which is how Siril itself resolves names when online.
 _VIZIER_NGC_CATALOG = "VII/118/ngc2000"
+_VIZIER_IC_CATALOG = "VII/114/ic"
 _VIZIER_SH2_CATALOG = "VII/20/catalog"
 _VIZIER_LDN_CATALOG = "VII/7A/ldn"
 
@@ -200,6 +196,7 @@ class DsoAnnotation:
     obj_type: str          # "Gx" (Messier/NGC/IC) or "star" (Sh2/LDN/stars)
     ra: float
     dec: float
+    catalog_kind: str = ""  # ngc | ic | messier | sh2 | ldn | stars
     pixel_x: float = 0.0
     pixel_y: float = 0.0
     diameter_arcmin: float = 0.0  # angular diameter from catalogue, 0 if unknown
@@ -293,6 +290,237 @@ def get_task_result(task_id: str) -> Optional[dict[str, Any]]:
         }
 
 
+def _catalogue_label(catalog_kind: str, raw_name: str) -> str:
+    compact = raw_name.strip().replace(" ", "")
+    if not compact:
+        return raw_name.strip()
+
+    explicit_ic = re.match(r"^(?:IC|I)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_ic:
+        return f"IC{explicit_ic.group(1)}"
+
+    explicit_ngc = re.match(r"^(?:NGC|N)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_ngc:
+        return f"NGC{explicit_ngc.group(1)}"
+
+    explicit_messier = re.match(r"^(?:M|MESSIER)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_messier:
+        return f"M{explicit_messier.group(1)}"
+
+    prefix_map = {
+        "ngc": "NGC",
+        "ic": "IC",
+        "messier": "M",
+        "sh2": "Sh2",
+        "ldn": "LdN",
+        "stars": "Star",
+    }
+    prefix = prefix_map.get(catalog_kind.lower(), catalog_kind.upper())
+
+    if compact.upper().startswith(prefix.upper()):
+        return compact
+
+    match = re.search(r"(\d+[A-Za-z]?)", compact)
+    if match:
+        return f"{prefix}{match.group(1)}"
+    return f"{prefix}{compact}"
+
+
+def _catalogue_kind_for_name(catalog_kind: str, raw_name: str) -> str:
+    """Infer the most specific catalogue kind from a raw catalogue name."""
+    catalog_kind = (catalog_kind or "").strip().lower()
+    compact = (raw_name or "").strip().replace(" ", "")
+
+    explicit_ic = re.match(r"^(?:IC|I)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_ic:
+        return "ic"
+
+    explicit_ngc = re.match(r"^(?:NGC|N)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_ngc:
+        return "ngc"
+
+    return catalog_kind
+
+
+def _annotation_color(catalog_kind: str, obj_type: str) -> str:
+    catalog_kind = (catalog_kind or "").strip().lower()
+    obj_type = (obj_type or "").strip().lower()
+    if catalog_kind == "ngc":
+        return "#7CFF6B"
+    if catalog_kind == "ic":
+        return "#FFB347"
+    if obj_type == "star":
+        return "#FF5D73"
+    return "#D6D6D6"
+
+
+def _skycoord_to_pixel(center_coord: SkyCoord, obj_coord: SkyCoord, pixel_scale_deg: float,
+                       rotation_deg: float, img_width: int, img_height: int) -> tuple[float, float]:
+    dra, ddec = center_coord.spherical_offsets_to(obj_coord)
+    dx_raw = -dra.deg / pixel_scale_deg
+    dy_raw = ddec.deg / pixel_scale_deg
+
+    if rotation_deg:
+        theta = -np.radians(rotation_deg)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        dx = dx_raw * cos_t - dy_raw * sin_t
+        dy = dx_raw * sin_t + dy_raw * cos_t
+    else:
+        dx, dy = dx_raw, dy_raw
+
+    return (img_width / 2.0) + dx, (img_height / 2.0) - dy
+
+
+@functools.lru_cache(maxsize=256)
+def _resolve_star_coord(star_name: str) -> Optional[SkyCoord]:
+    if not _HAS_ASTROQUERY:
+        return None
+    try:
+        Simbad.add_votable_fields("ra", "dec")
+        result = Simbad.query_object(star_name)
+        if result is None or len(result) == 0:
+            return None
+        return SkyCoord(ra=float(result["ra"][0]), dec=float(result["dec"][0]), unit=u.deg)
+    except Exception as exc:
+        log.debug("Could not resolve constellation star %s: %s", star_name, exc)
+        return None
+
+
+_CONSTELLATION_LINE_SEGMENTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "Cyg": (
+        ("Deneb", "Sadr"),
+        ("Sadr", "Albireo"),
+        ("Sadr", "Delta Cygni"),
+        ("Sadr", "Epsilon Cygni"),
+        ("Delta Cygni", "Zeta Cygni"),
+        ("Albireo", "Kappa Cygni"),
+    ),
+    "Cep": (
+        ("Alderamin", "Alfirk"),
+        ("Alderamin", "Errai"),
+        ("Alfirk", "Errai"),
+    ),
+    "Lyr": (
+        ("Vega", "Sheliak"),
+        ("Vega", "Sulafat"),
+        ("Sheliak", "Sulafat"),
+    ),
+    "Aql": (
+        ("Altair", "Tarazed"),
+        ("Altair", "Alshain"),
+    ),
+    "Cas": (
+        ("Caph", "Schedar"),
+        ("Schedar", "Gamma Cassiopeiae"),
+        ("Gamma Cassiopeiae", "Ruchbah"),
+        ("Ruchbah", "Segin"),
+        ("Segin", "Caph"),
+    ),
+    "Del": (
+        ("Sualocin", "Rotanev"),
+        ("Rotanev", "Delta Delphini"),
+        ("Sualocin", "Delta Delphini"),
+    ),
+}
+
+
+def _draw_constellation_overlay(ax, center_coord: SkyCoord, pixel_scale_deg: float,
+                                rotation_deg: float, img_width: int, img_height: int) -> list[DsoAnnotation]:
+    if not _HAS_ASTROQUERY:
+        return []
+
+    line_color = "#8DE8FF"
+    label_color = "#B7F1FF"
+    star_color = "#FFE08A"
+    drawn_any = False
+    star_points: dict[str, tuple[float, float, float, float]] = {}
+    visible_star_points: dict[str, tuple[float, float, float, float]] = {}
+
+    for constellation, segments in _CONSTELLATION_LINE_SEGMENTS.items():
+        constellation_points: list[tuple[float, float]] = []
+        for start_name, end_name in segments:
+            start_coord = _resolve_star_coord(start_name)
+            end_coord = _resolve_star_coord(end_name)
+            if start_coord is None or end_coord is None:
+                continue
+
+            start_xy = _skycoord_to_pixel(center_coord, start_coord, pixel_scale_deg,
+                                          rotation_deg, img_width, img_height)
+            end_xy = _skycoord_to_pixel(center_coord, end_coord, pixel_scale_deg,
+                                        rotation_deg, img_width, img_height)
+
+            start_payload = (start_xy[0], start_xy[1], float(start_coord.ra.deg), float(start_coord.dec.deg))
+            end_payload = (end_xy[0], end_xy[1], float(end_coord.ra.deg), float(end_coord.dec.deg))
+            star_points[start_name] = start_payload
+            star_points[end_name] = end_payload
+
+            if -80.0 <= start_xy[0] <= img_width + 80.0 and -80.0 <= start_xy[1] <= img_height + 80.0:
+                visible_star_points[start_name] = start_payload
+            if -80.0 <= end_xy[0] <= img_width + 80.0 and -80.0 <= end_xy[1] <= img_height + 80.0:
+                visible_star_points[end_name] = end_payload
+
+            ax.plot(
+                [start_xy[0], end_xy[0]],
+                [start_xy[1], end_xy[1]],
+                color=line_color,
+                linewidth=0.9,
+                alpha=0.65,
+                solid_capstyle="round",
+                zorder=2,
+            )
+            if -80.0 <= start_xy[0] <= img_width + 80.0 and -80.0 <= start_xy[1] <= img_height + 80.0:
+                constellation_points.append(start_xy)
+            if -80.0 <= end_xy[0] <= img_width + 80.0 and -80.0 <= end_xy[1] <= img_height + 80.0:
+                constellation_points.append(end_xy)
+            drawn_any = True
+
+        if constellation_points:
+            label_x = sum(point[0] for point in constellation_points) / len(constellation_points)
+            label_y = sum(point[1] for point in constellation_points) / len(constellation_points)
+            ax.text(
+                label_x,
+                label_y - 10,
+                constellation,
+                color=label_color,
+                fontsize=6,
+                weight="bold",
+                alpha=0.7,
+                ha="center",
+                va="bottom",
+                zorder=3,
+            )
+
+    for star_name, (x_pix, y_pix, ra_deg, dec_deg) in visible_star_points.items():
+        ax.scatter([x_pix], [y_pix], s=12, color=star_color, edgecolors="none", zorder=3, alpha=0.9)
+        ax.text(
+            x_pix + 3,
+            y_pix - 3,
+            star_name,
+            color=star_color,
+            fontsize=5.5,
+            weight="bold",
+            alpha=0.9,
+            ha="left",
+            va="bottom",
+            zorder=4,
+        )
+
+    if drawn_any:
+        ax.text(0.02, 0.98, "Constellation lines", transform=ax.transAxes,
+                color=label_color, fontsize=7, alpha=0.6, ha="left", va="top")
+
+    return [
+        DsoAnnotation(
+            name=star_name,
+            obj_type="star",
+            catalog_kind="stars",
+            ra=ra_deg,
+            dec=dec_deg,
+        )
+        for star_name, (_, _, ra_deg, dec_deg) in visible_star_points.items()
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Target name resolution
 # ---------------------------------------------------------------------------
@@ -332,15 +560,14 @@ def resolve_target(target_name: str) -> tuple[float, float, str]:
 
 
 # ---------------------------------------------------------------------------
-# NGC / IC / Sh2 / LDN catalogue — live VizieR (default) or local CSVs
+# NGC / IC catalogue — live VizieR (default) or local CSVs
 # ---------------------------------------------------------------------------
 
-# catalog_id, name-column candidates, ra column, dec column, ra unit,
-# diameter-column candidates, is_star_like (red vs orange marker colour)
-_VIZIER_CATALOGS: list[tuple[str, tuple[str, ...], str, str, u.Unit, tuple[str, ...], bool]] = [
-    (_VIZIER_NGC_CATALOG, ("Name",), "RAB2000", "DEB2000", u.hourangle, ("size", "Size", "Diam"), False),
-    (_VIZIER_SH2_CATALOG, ("Sh2", "Name"), "RAJ2000", "DEJ2000", u.deg, (), True),
-    (_VIZIER_LDN_CATALOG, ("LDN", "Name"), "RAJ2000", "DEJ2000", u.deg, (), True),
+# catalog_id, catalog_kind, name-column candidates, ra column, dec column,
+# ra unit, diameter-column candidates
+_VIZIER_CATALOGS: list[tuple[str, str, tuple[str, ...], str, str, u.Unit, tuple[str, ...]]] = [
+    (_VIZIER_NGC_CATALOG, "ngc", ("Name",), "RAB2000", "DEB2000", u.hourangle, ("size", "Size", "Diam")),
+    (_VIZIER_IC_CATALOG, "ic", ("Name",), "RAJ2000", "DEJ2000", u.deg, ("size", "Size", "Diam")),
 ]
 
 
@@ -353,10 +580,10 @@ def _vizier_first_col(colnames: list[str], candidates: tuple[str, ...]) -> Optio
 
 def _query_dso_vizier(ra_deg: float, dec_deg: float, radius_deg: float) -> list[DsoAnnotation]:
     """
-    Query the live catalogues Siril's own annotation set is built from —
-    NGC 2000.0 (NGC/IC), Sharpless (Sh2), Lynds' Catalogue of Dark Nebulae
-    (LDN) — via VizieR, plus SIMBAD for the 110 Messier objects. No local
-    files, no Siril install; requires internet at solve time.
+    Query the live catalogues used for the large-object overlay.
+
+    This intentionally keeps the map focused on NGC/IC objects rather than
+    filling the frame with low-value background catalogues.
     """
     if not _HAS_ASTROQUERY:
         log.warning("astroquery not installed — cannot query VizieR/SIMBAD. "
@@ -366,7 +593,7 @@ def _query_dso_vizier(ra_deg: float, dec_deg: float, radius_deg: float) -> list[
     coord = SkyCoord(ra=ra_deg, dec=dec_deg, unit=u.deg)
     annotations: list[DsoAnnotation] = []
 
-    for catalog_id, name_cands, ra_col_want, dec_col_want, ra_unit, diam_cands, is_star_like in _VIZIER_CATALOGS:
+    for catalog_id, catalog_kind, name_cands, ra_col_want, dec_col_want, ra_unit, diam_cands in _VIZIER_CATALOGS:
         try:
             vizier = Vizier(row_limit=2000)
             tables = vizier.query_region(coord, radius=radius_deg * u.deg, catalog=[catalog_id])
@@ -399,6 +626,7 @@ def _query_dso_vizier(ra_deg: float, dec_deg: float, radius_deg: float) -> list[
                     if not name:
                         continue
                     sc = SkyCoord(row[ra_col], row[dec_col], unit=(ra_unit, u.deg))
+                    inferred_kind = _catalogue_kind_for_name(catalog_kind, name)
                     diameter_arcmin = 0.0
                     if diam_col:
                         try:
@@ -408,7 +636,9 @@ def _query_dso_vizier(ra_deg: float, dec_deg: float, radius_deg: float) -> list[
                         except (ValueError, TypeError):
                             pass
                     annotations.append(DsoAnnotation(
-                        name=name, obj_type="star" if is_star_like else "Gx",
+                        name=_catalogue_label(inferred_kind, name),
+                        obj_type="Gx",
+                        catalog_kind=inferred_kind,
                         ra=float(sc.ra.deg), dec=float(sc.dec.deg),
                         diameter_arcmin=diameter_arcmin,
                     ))
@@ -418,9 +648,7 @@ def _query_dso_vizier(ra_deg: float, dec_deg: float, radius_deg: float) -> list[
 
         log.info("VizieR %s: %d objects", catalog_id, n_parsed)
 
-    annotations.extend(_query_messier_simbad(ra_deg, dec_deg, radius_deg))
-
-    log.info("VizieR/SIMBAD: %d objects total within %.2f° of (%.4f, %.4f)",
+    log.info("VizieR: %d objects total within %.2f° of (%.4f, %.4f)",
              len(annotations), radius_deg, ra_deg, dec_deg)
     return annotations
 
@@ -503,7 +731,7 @@ def _load_dso_catalogues_csv() -> tuple[dict[str, Any], ...]:
                     "(set ASTROCAP_DSO_CATALOG_DIR)", _DSO_CATALOG_DIR)
         return tuple(objects)
 
-    for filename, is_star_like in _DSO_CATALOG_FILES:
+    for filename, catalog_kind in _DSO_CATALOG_FILES:
         path = _DSO_CATALOG_DIR / filename
         if not path.exists():
             log.warning("Catalogue file missing, skipping: %s", path)
@@ -522,6 +750,8 @@ def _load_dso_catalogues_csv() -> tuple[dict[str, Any], ...]:
                 except (KeyError, ValueError, TypeError):
                     continue
 
+                inferred_kind = _catalogue_kind_for_name(catalog_kind, name)
+
                 diameter_raw = (row.get("diameter") or "").strip()
                 try:
                     diameter_arcmin = float(diameter_raw) if diameter_raw else 0.0
@@ -534,7 +764,7 @@ def _load_dso_catalogues_csv() -> tuple[dict[str, Any], ...]:
                     "ra": ra_deg,
                     "dec": dec_deg,
                     "diameter_arcmin": diameter_arcmin,
-                    "is_star_like": is_star_like,
+                    "catalog_kind": inferred_kind,
                 })
             log.info("Loaded %d objects from %s", len(objects) - n_before, filename)
 
@@ -555,8 +785,9 @@ def _query_dso_csv(ra_deg: float, dec_deg: float, radius_deg: float) -> list[Dso
         obj_coord = SkyCoord(ra=obj["ra"], dec=obj["dec"], unit=u.deg)
         if center.separation(obj_coord).deg <= radius_deg:
             annotations.append(DsoAnnotation(
-                name=obj["name"],
-                obj_type="star" if obj["is_star_like"] else "Gx",
+                name=_catalogue_label(obj["catalog_kind"], obj["name"]),
+                obj_type="Gx",
+                catalog_kind=obj["catalog_kind"],
                 ra=obj["ra"], dec=obj["dec"],
                 diameter_arcmin=obj["diameter_arcmin"],
             ))
@@ -568,9 +799,9 @@ def query_dso_catalogues(ra_deg: float, dec_deg: float,
     """
     Find catalogue objects within radius_deg of (ra_deg, dec_deg).
 
-    ASTROCAP_DSO_SOURCE="vizier" (default): live NGC2000/Sh2/LDN (VizieR) +
-    Messier (SIMBAD) — the same catalogues Siril's are built from, no
-    extracted Siril files, requires internet.
+    ASTROCAP_DSO_SOURCE="vizier" (default): live NGC2000 + IC (VizieR) —
+    the large-object catalogues used here for bearings, no extracted Siril
+    files, requires internet.
     ASTROCAP_DSO_SOURCE="csv": local CSVs extracted from a Siril install
     (offline, set ASTROCAP_DSO_CATALOG_DIR).
     """
@@ -781,6 +1012,8 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
     rgb = np.power(rgb, 0.5)
 
     img_height, img_width, _ = rgb.shape
+    base_img_height = img_height
+    base_img_width = img_width
     # half_size=True in rawpy halves the pixel dimensions, so the
     # effective arcsec/pixel for *this* image is double what Siril
     # solved on the full-resolution frame.
@@ -800,55 +1033,83 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
         search_radius,
     )
 
-    fig, ax = plt.subplots(figsize=(12, 8), dpi=150, facecolor='black')
-    try:
-        ax.imshow(rgb, origin='upper')
-        ax.set_facecolor('#000000')
+    border_px_x = max(24, int(round(base_img_width * 0.05)))
+    border_px_y = max(24, int(round(base_img_height * 0.05)))
+    rgb = np.pad(
+        rgb,
+        ((border_px_y, border_px_y), (border_px_x, border_px_x), (0, 0)),
+        mode="constant",
+        constant_values=0.0,
+    )
+    img_height, img_width, _ = rgb.shape
 
-        theta = -np.radians(rotation_deg)
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
+    render_dpi = 300
+    fig, ax = plt.subplots(
+        figsize=(img_width / render_dpi, img_height / render_dpi),
+        dpi=render_dpi,
+        facecolor='black',
+    )
+    try:
+        ax.imshow(rgb, origin='upper', interpolation='nearest')
+        ax.set_facecolor('#000000')
+        ax.set_position([0, 0, 1, 1])
+        ax.set_xlim(0, img_width)
+        ax.set_ylim(img_height, 0)
+        ax.set_autoscale_on(False)
+        ax.set_axis_off()
 
         for obj in local_objects:
             obj_coord = SkyCoord(ra=obj.ra, dec=obj.dec, unit=u.deg)
-            dra, ddec = center_coord.spherical_offsets_to(obj_coord)
-
-            dx_raw = -dra.deg / pixel_scale_deg
-            dy_raw = ddec.deg / pixel_scale_deg
-
-            dx_rotated = dx_raw * cos_t - dy_raw * sin_t
-            dy_rotated = dx_raw * sin_t + dy_raw * cos_t
-
-            x_pix = (img_width / 2.0) + dx_rotated
-            y_pix = (img_height / 2.0) - dy_rotated
+            x_pix, y_pix = _skycoord_to_pixel(
+                center_coord,
+                obj_coord,
+                pixel_scale_deg,
+                rotation_deg,
+                img_width,
+                img_height,
+            )
 
             if 0 <= x_pix < img_width and 0 <= y_pix < img_height:
-                layer_color = '#e74c3c' if obj.obj_type == "star" else '#e67e22'
+                layer_color = _annotation_color(obj.catalog_kind, obj.obj_type)
 
                 if obj.diameter_arcmin > 0:
                     diameter_arcsec = obj.diameter_arcmin * 60.0
                     marker_radius_pixels = (diameter_arcsec / half_size_scale) / 2.0
-                    if marker_radius_pixels < 12:
-                        marker_radius_pixels = 12
+                    marker_radius_pixels = max(marker_radius_pixels, 4.0 if obj.catalog_kind == "ic" else 5.0)
                 else:
-                    marker_radius_pixels = 15 if obj.obj_type == "star" else 25
+                    marker_radius_pixels = 4.0 if obj.catalog_kind == "ic" else 5.0
 
-                circle = plt.Circle((x_pix, y_pix), radius=marker_radius_pixels, color=layer_color,
-                                     fill=False, linewidth=1.1, alpha=0.8)
+                circle = plt.Circle(
+                    (x_pix, y_pix),
+                    radius=marker_radius_pixels,
+                    edgecolor=layer_color,
+                    facecolor="none",
+                    fill=False,
+                    linewidth=1.0,
+                    alpha=0.95,
+                )
                 ax.add_patch(circle)
 
                 ax.text(x_pix + (marker_radius_pixels + 4), y_pix, obj.name, color=layer_color,
-                        fontsize=7, weight='bold',
-                        bbox=dict(facecolor='#111111', alpha=0.5, edgecolor='none', pad=1))
+                        fontsize=6.5, weight='bold',
+                        bbox=dict(facecolor='#111111', alpha=0.45, edgecolor='none', pad=1))
 
-        ax.axis('off')
-        fig.tight_layout()
-        fig.savefig(output_png, bbox_inches='tight', pad_inches=0.2, dpi=300)
+        star_annotations = _draw_constellation_overlay(
+            ax=ax,
+            center_coord=center_coord,
+            pixel_scale_deg=pixel_scale_deg,
+            rotation_deg=rotation_deg,
+            img_width=img_width,
+            img_height=img_height,
+        )
+
+        fig.savefig(output_png, pad_inches=0, dpi=render_dpi)
     finally:
         # Always close the figure, even if something above raises, so
         # long-running Flask workers don't leak figures/memory over time.
         plt.close(fig)
 
-    return local_objects, img_width, img_height, half_size_scale
+    return local_objects + star_annotations, base_img_width, base_img_height, half_size_scale
 
 def run_flatpak_siril_annotation(config: dict):
     print(f"[*] Running Siril annotation pipeline with config: {config}")

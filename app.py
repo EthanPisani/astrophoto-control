@@ -49,7 +49,7 @@ log = logging.getLogger("astrocap")
  
  
 @contextlib.contextmanager
-def logged_camera_call(op: str, on_step=None, **ctx: Any):
+def logged_camera_call(op: str, on_step=None, log_exceptions: bool = True, **ctx: Any):
     """Wrap a single call to the camera bridge with start/outcome/timing
     logs, tagged with whatever context is passed in (session id, seq,
     capture id, etc). This is what lets us reconstruct, after the fact,
@@ -71,14 +71,16 @@ def logged_camera_call(op: str, on_step=None, **ctx: Any):
         yield
     except ApiFailure as exc:
         duration = time.time() - started
-        log.error(
-            "camera-call FAILED %s after %.2fs -> HTTP %s: %s",
-            label, duration, exc.status_code, exc,
-        )
+        if log_exceptions:
+            log.error(
+                "camera-call FAILED %s after %.2fs -> HTTP %s: %s",
+                label, duration, exc.status_code, exc,
+            )
         raise
     except Exception as exc:  # noqa: BLE001
         duration = time.time() - started
-        log.exception("camera-call FAILED %s after %.2fs -> %s", label, duration, exc)
+        if log_exceptions:
+            log.exception("camera-call FAILED %s after %.2fs -> %s", label, duration, exc)
         raise
     else:
         duration = time.time() - started
@@ -1388,14 +1390,18 @@ _camera_health_cache_lock = threading.Lock()
 _camera_health_cache: dict[str, Any] = {"expires_at": 0.0, "state": None}
 CAMERA_HEALTH_CACHE_TTL_S = 5.0
  
- 
+# Track last health check error to avoid spamming logs with repeated failures
+_last_health_error: Optional[str] = None
+_last_health_error_lock = threading.Lock()
+
+
 def get_camera_health() -> dict[str, Any]:
     """Query (or return a cached) camera health snapshot.
- 
+
     Camera hardware behind the gphoto2 bridge is effectively single-consumer
     — issuing a health check while a real capture is in flight can conflict
     with it ("camera is busy with another operation"). Two safeguards:
- 
+
     1. Callers should skip this entirely while a session is actively
        capturing (see health_api below) and infer reachability from that.
     2. When idle, this result is cached for a few seconds so that any
@@ -1403,36 +1409,54 @@ def get_camera_health() -> dict[str, Any]:
        into a single upstream hardware query instead of each issuing
        their own.
     """
+    global _last_health_error
     now = time.time()
     with _camera_health_cache_lock:
         cached = _camera_health_cache
         if cached["state"] is not None and now < cached["expires_at"]:
             return cached["state"]
- 
+
     try:
-        with logged_camera_call("health"):
+        with logged_camera_call("health", log_exceptions=False):
             camera = api_client.health()
         state = {
             "reachable": True,
             "model": camera.get("camera_model"),
             "status": camera.get("status", "ok"),
         }
+        # Clear error tracking on success
+        with _last_health_error_lock:
+            if _last_health_error is not None:
+                log.info("camera health recovered: %s", _last_health_error)
+                _last_health_error = None
     except ApiFailure as exc:
         state = {"reachable": False, "model": None, "status": "error", "error": str(exc)}
+        _log_health_error_once(str(exc))
     except Exception as exc:  # noqa: BLE001
         state = {"reachable": False, "model": None, "status": "error", "error": str(exc)}
- 
+        _log_health_error_once(str(exc))
+
     with _camera_health_cache_lock:
         _camera_health_cache["state"] = state
         _camera_health_cache["expires_at"] = now + CAMERA_HEALTH_CACHE_TTL_S
     return state
- 
- 
+
+
+def _log_health_error_once(error_msg: str) -> None:
+    """Log health check error only when it changes from the previous error."""
+    global _last_health_error
+    with _last_health_error_lock:
+        if _last_health_error != error_msg:
+            log.warning("camera health check failed: %s", error_msg)
+            _last_health_error = error_msg
+        # else: same error as before, silently skip logging
+
+
 @app.route("/health/api")
 def health_api() -> tuple[Any, int] | Any:
     session = session_manager.current_session()
     is_capturing = bool(session and session["status"] in {"running", "paused", "canceling"})
- 
+
     if is_capturing:
         # A session already owns the camera and is actively proving it's
         # reachable via real captures — skip the redundant hardware round
@@ -1443,7 +1467,7 @@ def health_api() -> tuple[Any, int] | Any:
     else:
         camera_state = get_camera_health()
         status_code = 200 if camera_state["reachable"] else 503
- 
+
     payload = {
         "camera": camera_state,
         "disk": disk_stats(OUTPUT_BASE_DIR),
