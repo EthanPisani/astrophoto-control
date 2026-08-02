@@ -392,8 +392,6 @@ _CONSTELLATION_LINE_SEGMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Sadr", "Albireo"),
         ("Sadr", "Delta Cygni"),
         ("Sadr", "Epsilon Cygni"),
-        ("Delta Cygni", "Zeta Cygni"),
-        ("Albireo", "Kappa Cygni"),
     ),
     "Cep": (
         ("Alderamin", "Alfirk"),
@@ -422,6 +420,51 @@ _CONSTELLATION_LINE_SEGMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Sualocin", "Delta Delphini"),
     ),
 }
+
+
+_COMMON_STAR_NAMES: dict[str, str] = {
+    "sadr": "Sadr",
+    "deneb": "Deneb",
+    "albireo": "Albireo",
+    "vega": "Vega",
+    "altair": "Altair",
+    "polaris": "Polaris",
+    "rigel": "Rigel",
+    "betelgeuse": "Betelgeuse",
+    "sirius": "Sirius",
+    "canopus": "Canopus",
+    "arcturus": "Arcturus",
+    "capella": "Capella",
+    "aldebaran": "Aldebaran",
+    "antares": "Antares",
+    "spica": "Spica",
+    "fomalhaut": "Fomalhaut",
+    "procyon": "Procyon",
+    "mimosa": "Mimosa",
+    "acrux": "Acrux",
+    "hadar": "Hadar",
+    "shaula": "Shaula",
+    "nunki": "Nunki",
+}
+
+
+def _display_star_name(raw_name: str) -> tuple[str, list[str]]:
+    """Return the preferred label and search-friendly fallbacks for a star."""
+    cleaned = (raw_name or "").strip()
+    if not cleaned:
+        return "", []
+
+    compact = cleaned.replace(" ", "")
+    lookup = compact.lower()
+
+    if lookup in _COMMON_STAR_NAMES:
+        return _COMMON_STAR_NAMES[lookup], [cleaned, compact]
+
+    bayer_match = re.match(r"^(Alpha|Beta|Gamma|Delta|Epsilon|Zeta|Eta|Theta|Iota|Kappa|Lambda|Mu|Nu|Xi|Omicron|Pi|Rho|Sigma|Tau|Upsilon|Phi|Chi|Psi|Omega)\s+(.+)$", cleaned, re.IGNORECASE)
+    if bayer_match:
+        return cleaned, [cleaned, compact]
+
+    return cleaned, [cleaned, compact]
 
 
 def _draw_constellation_overlay(ax, center_coord: SkyCoord, pixel_scale_deg: float,
@@ -474,30 +517,15 @@ def _draw_constellation_overlay(ax, center_coord: SkyCoord, pixel_scale_deg: flo
                 constellation_points.append(end_xy)
             drawn_any = True
 
-        if constellation_points:
-            label_x = sum(point[0] for point in constellation_points) / len(constellation_points)
-            label_y = sum(point[1] for point in constellation_points) / len(constellation_points)
-            ax.text(
-                label_x,
-                label_y - 10,
-                constellation,
-                color=label_color,
-                fontsize=6,
-                weight="bold",
-                alpha=0.7,
-                ha="center",
-                va="bottom",
-                zorder=3,
-            )
-
     for star_name, (x_pix, y_pix, ra_deg, dec_deg) in visible_star_points.items():
+        display_name, _ = _display_star_name(star_name)
         ax.scatter([x_pix], [y_pix], s=12, color=star_color, edgecolors="none", zorder=3, alpha=0.9)
         ax.text(
             x_pix + 3,
             y_pix - 3,
-            star_name,
+            display_name,
             color=star_color,
-            fontsize=5.5,
+            fontsize=12,
             weight="bold",
             alpha=0.9,
             ha="left",
@@ -505,13 +533,9 @@ def _draw_constellation_overlay(ax, center_coord: SkyCoord, pixel_scale_deg: flo
             zorder=4,
         )
 
-    if drawn_any:
-        ax.text(0.02, 0.98, "Constellation lines", transform=ax.transAxes,
-                color=label_color, fontsize=7, alpha=0.6, ha="left", va="top")
-
     return [
         DsoAnnotation(
-            name=star_name,
+            name=_display_star_name(star_name)[0] or star_name,
             obj_type="star",
             catalog_kind="stars",
             ra=ra_deg,
