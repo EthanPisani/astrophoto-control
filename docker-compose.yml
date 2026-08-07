@@ -1,0 +1,46 @@
+# ============================================================================
+# AstroCap — docker compose configuration
+# ============================================================================
+#
+# Quick start:
+#   docker compose up -d
+#
+# Access the UI at http://localhost:7777
+#
+# Configuration is via environment variables — see .env.example below.
+# ============================================================================
+
+services:
+  astrocap:
+    image: astrocap:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: astrocap
+    # host networking is the simplest way to reach the camera bridge
+    # (nikon_bulb_server) on a Raspberry Pi or other LAN device.
+    network_mode: host
+    volumes:
+      # All capture files, the SQLite DB, and plate-solve outputs live here
+      - astrocap_data:/data
+    environment:
+      - ASTROCAP_PORT=${ASTROCAP_PORT:-7777}
+      - ASTROCAP_OUTDIR=${ASTROCAP_OUTDIR:-/data}
+      - ASTROCAP_DB_PATH=${ASTROCAP_DB_PATH:-/data/astrocap.db}
+      - ASTROCAP_MAX_RAM_GB=${ASTROCAP_MAX_RAM_GB:-4}
+      - GPHOTO_API_BASE=${GPHOTO_API_BASE:-http://10.0.0.69:8080}
+      - ASTROCAP_SOLVER_BACKEND=${ASTROCAP_SOLVER_BACKEND:-local}
+      - ASTROCAP_HTTP_TIMEOUT=${ASTROCAP_HTTP_TIMEOUT:-20}
+    restart: unless-stopped
+    # Give astap_cli enough time to shut down gracefully
+    stop_grace_period: 30s
+
+volumes:
+  astrocap_data:
+    # Use a named volume. Change to a bind mount if you prefer a
+    # specific host path:
+    #   driver: local
+    #   driver_opts:
+    #     type: none
+    #     o: bind
+    #     device: /path/to/host/captures

@@ -1,0 +1,102 @@
+# ============================================================================
+# AstroCap — Forgejo Actions workflow
+# ============================================================================
+# Builds the multi-stage Docker image and pushes it to the Forgejo
+# container registry.
+#
+# SETUP (one time):
+#   1. Enable Actions in your Forgejo instance (app.ini: [actions] ENABLED=true)
+#   2. Register a runner on a machine with Docker installed:
+#        forgejo-runner register --no-interactive \
+#          --instance <your-forgejo-url> \
+#          --token <runner-token> \
+#          --name astrocap-builder
+#      The runner label must be "docker" (or change runs-on below).
+#   3. Create a FORGEJO_TOKEN secret in the repo:
+#        Settings → Actions → Secrets → New Secret
+#        Name:  FORGEJO_TOKEN
+#        Value: A token with read:packages + write:packages scopes
+#              (create at Settings → Applications → Generate New Token)
+#
+# The image is ~1.5–2 GB (ASTAP star databases + Python site-packages
+# + catalogs), so the first build takes 30-60 min. Subsequent builds
+# use layer caching and are faster.
+#
+# Pull the result:
+#   docker pull <your-forgejo-host>/{owner}/astrocap:latest
+# ============================================================================
+
+name: Docker build & publish
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - ".dockerignore"
+      - ".env.example"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    # Requires a Forgejo runner with the "docker" label and Docker
+    # installed on the host.  The Docker socket is bind-mounted so
+    # the build steps can talk to the host daemon directly.
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-latest
+      options: -v /var/run/docker.sock:/var/run/docker.sock
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -- Extract registry host from server URL -------------------------
+      - name: Set registry host
+        id: registry
+        run: |
+          HOST=$(echo "${{ gitea.server_url }}" | sed 's|^https\?://||' | sed 's|/.*||')
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "Registry host: $HOST"
+
+      # -- Metadata tags -------------------------------------------------
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ steps.registry.outputs.host }}/${{ gitea.repository_owner }}/astrocap
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # -- Log into the Forgejo container registry -----------------------
+      - name: Login to Forgejo registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.FORGEJO_TOKEN }}
+
+      # -- Build and push ------------------------------------------------
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ gitea.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ steps.registry.outputs.host }}/${{ gitea.repository_owner }}/astrocap:buildcache
+          cache-to: type=registry,ref=${{ steps.registry.outputs.host }}/${{ gitea.repository_owner }}/astrocap:buildcache,mode=max

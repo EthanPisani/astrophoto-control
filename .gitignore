@@ -1,3 +1,31 @@
+# -------- capture data --------
 /captures
-.venv
-__pycache__
+/astro_temp
+
+# -------- Python --------
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# -------- environment --------
+.env
+
+# -------- generated catalog files (built during Docker build) --------
+constellation_lines.csv
+
+# -------- IDE --------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# -------- OS --------
+.DS_Store
+Thumbs.db
+
+# -------- Docker volumes --------
+data/

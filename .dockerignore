@@ -1,0 +1,45 @@
+# -------- capture data (mounted as volume at runtime) --------
+captures/
+astro_temp/
+
+# -------- Python artifacts --------
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# -------- IDE / editor --------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# -------- OS junk --------
+.DS_Store
+Thumbs.db
+
+# -------- Git --------
+.git/
+.gitignore
+.dockerignore
+
+# -------- Docker --------
+Dockerfile
+docker-compose.yml
+
+# -------- Test / dev files --------
+test.fits
+test.ini
+test.wcs
+
+# -------- Generated catalog files (rebuilt during docker build) --------
+constellation_lines.csv
+app2.py
+*.md
+README.md
+
+# -------- Rust companion (not part of this image) --------
+astrocap/

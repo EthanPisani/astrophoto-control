@@ -98,8 +98,12 @@ _DSO_CATALOG_DIR = Path(os.path.expanduser(
 
 # (filename, catalog_kind) — catalog_kind drives the colour split.
 # The LDN layer is intentionally excluded because it obscures the chart
-# instead of helping with bearings.
+# instead of helping with bearings. messier.csv is listed first since it's
+# the highest-priority catalogue (see _CATALOG_PRIORITY) — order here
+# doesn't affect drawing (that's handled by the priority sort), but keeping
+# it first matches the priority order for readability.
 _DSO_CATALOG_FILES: list[tuple[str, str]] = [
+    ("messier.csv", "messier"),
     ("ngc.csv", "ngc"),
     ("ic.csv", "ic"),
 ]
@@ -331,6 +335,10 @@ def _catalogue_kind_for_name(catalog_kind: str, raw_name: str) -> str:
     catalog_kind = (catalog_kind or "").strip().lower()
     compact = (raw_name or "").strip().replace(" ", "")
 
+    explicit_messier = re.match(r"^(?:M|MESSIER)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
+    if explicit_messier:
+        return "messier"
+
     explicit_ic = re.match(r"^(?:IC|I)(\d+[A-Za-z]?)$", compact, re.IGNORECASE)
     if explicit_ic:
         return "ic"
@@ -345,6 +353,8 @@ def _catalogue_kind_for_name(catalog_kind: str, raw_name: str) -> str:
 def _annotation_color(catalog_kind: str, obj_type: str) -> str:
     catalog_kind = (catalog_kind or "").strip().lower()
     obj_type = (obj_type or "").strip().lower()
+    if catalog_kind == "messier":
+        return "#FFD23F"
     if catalog_kind == "ngc":
         return "#7CFF6B"
     if catalog_kind == "ic":
@@ -352,6 +362,56 @@ def _annotation_color(catalog_kind: str, obj_type: str) -> str:
     if obj_type == "star":
         return "#FF5D73"
     return "#D6D6D6"
+
+
+# Draw/keep priority when the same physical object shows up under more
+# than one catalogue (e.g. M31 is also NGC224) or when a catalogue object
+# happens to sit on top of a constellation star/line. Lower number = higher
+# priority = drawn last (on top) and kept over a lower-priority duplicate.
+_CATALOG_PRIORITY: dict[str, int] = {
+    "messier": 0,
+    "ngc": 1,
+    "ic": 2,
+    "star": 3,
+    "stars": 3,
+    "constellation": 4,
+}
+
+
+def _catalog_priority(catalog_kind: str, obj_type: str = "") -> int:
+    kind = (catalog_kind or "").strip().lower()
+    if kind in _CATALOG_PRIORITY:
+        return _CATALOG_PRIORITY[kind]
+    if (obj_type or "").strip().lower() == "star":
+        return _CATALOG_PRIORITY["star"]
+    return _CATALOG_PRIORITY["constellation"]
+
+
+def _dedupe_dso_by_priority(annotations: list["DsoAnnotation"],
+                             sep_threshold_arcsec: float = 60.0) -> list["DsoAnnotation"]:
+    """
+    Collapse catalogue entries that refer to the same physical object (e.g.
+    M31 from the Messier query and NGC224 from the NGC/IC query) down to a
+    single annotation, keeping whichever entry has the higher catalogue
+    priority (Messier > NGC > IC). Entries are considered the same object
+    if they're within sep_threshold_arcsec of each other on sky.
+    """
+    if not annotations:
+        return []
+
+    ordered = sorted(annotations, key=lambda o: _catalog_priority(o.catalog_kind, o.obj_type))
+    threshold = sep_threshold_arcsec * u.arcsec
+
+    kept: list["DsoAnnotation"] = []
+    kept_coords: list[SkyCoord] = []
+    for obj in ordered:
+        obj_coord = SkyCoord(ra=obj.ra, dec=obj.dec, unit=u.deg)
+        if any(obj_coord.separation(kc) <= threshold for kc in kept_coords):
+            continue
+        kept.append(obj)
+        kept_coords.append(obj_coord)
+
+    return kept
 
 
 def _skycoord_to_pixel(center_coord: SkyCoord, obj_coord: SkyCoord, pixel_scale_deg: float,
@@ -690,19 +750,46 @@ def _all_messier_objects() -> tuple[dict[str, Any], ...]:
     try:
         simbad = Simbad()
         simbad.add_votable_fields("ra", "dec", "dim")
-        result = simbad.query_objects([f"M{i}" for i in range(1, 111)])
+        query_names = [f"M{i}" for i in range(1, 111)]
+        result = simbad.query_objects(query_names)
         if result is None:
             return tuple()
 
+        # Column names/casing have shifted across astroquery versions
+        # (older releases returned "TYPED_ID", newer TAP-based ones return
+        # lowercase names like "main_id"/"typed_id") — match case-insensitively
+        # instead of hardcoding one casing, or every row silently falls back
+        # to a placeholder name.
+        colnames_by_lower = {c.lower(): c for c in result.colnames}
+        id_col = next(
+            (colnames_by_lower[c] for c in ("typed_id", "main_id", "id") if c in colnames_by_lower),
+            None,
+        )
+        if id_col is None:
+            log.warning(
+                "SIMBAD Messier query: no identifier column found in %s — "
+                "falling back to positional name matching, which is only "
+                "correct if every M1..M110 query resolved in order",
+                result.colnames,
+            )
+
         objects: list[dict[str, Any]] = []
-        id_col = "TYPED_ID" if "TYPED_ID" in result.colnames else None
-        for row in result:
+        for idx, row in enumerate(result):
             try:
                 ra_deg = float(row["ra"])
                 dec_deg = float(row["dec"])
             except (ValueError, KeyError, TypeError):
                 continue
-            name = str(row[id_col]).strip() if id_col else "M?"
+
+            if id_col is not None:
+                name = str(row[id_col]).strip()
+            elif idx < len(query_names):
+                name = query_names[idx]
+            else:
+                name = ""
+            if not name:
+                continue
+
             diameter_arcmin = 0.0
             for dim_col in ("galdim_majaxis", "dim_majaxis"):
                 if dim_col in result.colnames:
@@ -731,7 +818,10 @@ def _query_messier_simbad(ra_deg: float, dec_deg: float, radius_deg: float) -> l
         obj_coord = SkyCoord(ra=obj["ra"], dec=obj["dec"], unit=u.deg)
         if center.separation(obj_coord).deg <= radius_deg:
             out.append(DsoAnnotation(
-                name=obj["name"], obj_type="Gx", ra=obj["ra"], dec=obj["dec"],
+                name=_catalogue_label("messier", obj["name"]),
+                obj_type="Gx",
+                catalog_kind="messier",
+                ra=obj["ra"], dec=obj["dec"],
                 diameter_arcmin=obj["diameter_arcmin"],
             ))
     return out
@@ -823,16 +913,27 @@ def query_dso_catalogues(ra_deg: float, dec_deg: float,
     """
     Find catalogue objects within radius_deg of (ra_deg, dec_deg).
 
-    ASTROCAP_DSO_SOURCE="vizier" (default): live NGC2000 + IC (VizieR) —
-    the large-object catalogues used here for bearings, no extracted Siril
-    files, requires internet.
-    ASTROCAP_DSO_SOURCE="csv": local CSVs extracted from a Siril install
-    (offline, set ASTROCAP_DSO_CATALOG_DIR).
+    ASTROCAP_DSO_SOURCE="vizier" (default): live NGC2000 + IC (VizieR),
+    plus Messier objects resolved via the cached SIMBAD lookup — no
+    extracted Siril files needed, requires internet.
+    ASTROCAP_DSO_SOURCE="csv": local CSVs extracted from a Siril install,
+    including messier.csv if present (offline, set
+    ASTROCAP_DSO_CATALOG_DIR).
+
+    Objects that refer to the same physical target under more than one
+    catalogue (e.g. M31 / NGC224) are deduplicated, keeping the entry from
+    the higher-priority catalogue: Messier > NGC > IC. The returned list is
+    ordered lowest-to-highest priority so callers who draw in list order
+    naturally render Messier objects on top of NGC, and NGC on top of IC.
     """
     if _DSO_SOURCE == "csv":
         annotations = _query_dso_csv(ra_deg, dec_deg, radius_deg)
     else:
         annotations = _query_dso_vizier(ra_deg, dec_deg, radius_deg)
+        annotations += _query_messier_simbad(ra_deg, dec_deg, radius_deg)
+
+    annotations = _dedupe_dso_by_priority(annotations)
+    annotations.sort(key=lambda o: _catalog_priority(o.catalog_kind, o.obj_type), reverse=True)
 
     log.info("Catalogue (%s): %d objects within %.2f° of (%.4f, %.4f)",
              _DSO_SOURCE, len(annotations), radius_deg, ra_deg, dec_deg)
@@ -1082,7 +1183,25 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
         ax.set_autoscale_on(False)
         ax.set_axis_off()
 
-        for obj in local_objects:
+        # Constellation lines/stars are the lowest annotation priority, so
+        # draw them first — anything from the DSO catalogues (Messier, NGC,
+        # IC, in that priority order below) then layers on top of them.
+        star_annotations = _draw_constellation_overlay(
+            ax=ax,
+            center_coord=center_coord,
+            pixel_scale_deg=pixel_scale_deg,
+            rotation_deg=rotation_deg,
+            img_width=img_width,
+            img_height=img_height,
+        )
+
+        # local_objects is already ordered lowest-to-highest catalogue
+        # priority (see query_dso_catalogues), so drawing in list order
+        # naturally stacks Messier > NGC > IC. zorder is set explicitly
+        # too (offset above the constellation overlay's zorder<=4) so the
+        # priority holds even if matplotlib's default paint order changes.
+        base_zorder = 10
+        for draw_index, obj in enumerate(local_objects):
             obj_coord = SkyCoord(ra=obj.ra, dec=obj.dec, unit=u.deg)
             x_pix, y_pix = _skycoord_to_pixel(
                 center_coord,
@@ -1095,6 +1214,7 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
 
             if 0 <= x_pix < img_width and 0 <= y_pix < img_height:
                 layer_color = _annotation_color(obj.catalog_kind, obj.obj_type)
+                obj_zorder = base_zorder + draw_index
 
                 if obj.diameter_arcmin > 0:
                     diameter_arcsec = obj.diameter_arcmin * 60.0
@@ -1111,21 +1231,13 @@ def bake_png_annotations(nef_path: str, output_png: str, center_ra: str, center_
                     fill=False,
                     linewidth=1.0,
                     alpha=0.95,
+                    zorder=obj_zorder,
                 )
                 ax.add_patch(circle)
 
                 ax.text(x_pix + (marker_radius_pixels + 4), y_pix, obj.name, color=layer_color,
-                        fontsize=6.5, weight='bold',
+                        fontsize=6.5, weight='bold', zorder=obj_zorder,
                         bbox=dict(facecolor='#111111', alpha=0.45, edgecolor='none', pad=1))
-
-        star_annotations = _draw_constellation_overlay(
-            ax=ax,
-            center_coord=center_coord,
-            pixel_scale_deg=pixel_scale_deg,
-            rotation_deg=rotation_deg,
-            img_width=img_width,
-            img_height=img_height,
-        )
 
         fig.savefig(output_png, pad_inches=0, dpi=render_dpi)
     finally:
