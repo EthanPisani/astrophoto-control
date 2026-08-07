@@ -25,17 +25,11 @@
 FROM python:3.12-slim-bookworm AS builder
 
 # -- Install system packages ----------------------------------------
-# astap-cli: the plate-solving engine (from official .deb)
-# libraw:    rawpy's native dependency for RAW decoding
-# wget, dpkg-deb: for downloading/extracting ASTAP
-# sqlite3:   optional, for inspecting the DB if needed
+# wget, unzip: for downloading/extracting ASTAP
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     unzip \
     ca-certificates \
-    libraw23 \
-    libgtk-3-0 \
-    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Install ASTAP --------------------------------------------------
@@ -95,9 +89,9 @@ RUN cd /build && python build_star_catalogs.py
 # ------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
-# System libs that rawpy, OpenCV, and astap_cli need at runtime
+# System libs that rawpy, OpenCV, and astap_cli need at runtime.
+# rawpy bundles libraw statically in its wheel -- no system libraw needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libraw23 \
     libgtk-3-0 \
     libglib2.0-0 \
     libgomp1 \
