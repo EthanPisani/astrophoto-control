@@ -1,4 +1,3 @@
-
 from __future__ import annotations
  
 import contextlib
@@ -23,9 +22,40 @@ from flask import Flask, jsonify, render_template, request, send_file, url_for
 # Import plate solving module (creates background tasks)
 import platesolve
 import siril_annotate
+import astap_annotate
 import auto_flat_exposure
 use_siril_backend = False
+use_local_backend = False
  
+# Hard backstop on total process memory. This is deliberately blunt: it
+# doesn't try to guess which code path might over-allocate (that's what
+# the LIMIT/mag-ordering fix in astap_annotate.py's cone search is for) --
+# it just guarantees that whatever runs in this process, including future
+# bugs, a bad focal-length/pixel-size value from the webui, or a plate
+# solve on an unexpectedly huge field, cannot push the machine into a
+# system-wide OOM. On Linux/macOS this makes the process raise
+# MemoryError and fail that one request/task instead of the kernel OOM
+# killer picking a victim process (which might not even be this one).
+# RLIMIT_AS isn't available on Windows -- skipped there, no-op.
+ASTROCAP_MAX_RAM_GB = float(os.environ.get("ASTROCAP_MAX_RAM_GB", "6"))
+
+
+def _apply_memory_limit(max_gb: float) -> None:
+    try:
+        import resource
+    except ImportError:
+        log.warning("resource module unavailable (Windows?) -- no memory cap applied")
+        return
+    max_bytes = int(max_gb * (1024 ** 3))
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        new_hard = hard if hard != resource.RLIM_INFINITY and hard < max_bytes else max_bytes
+        resource.setrlimit(resource.RLIMIT_AS, (max_bytes, new_hard))
+        log.info("Process memory capped at %.1f GB (RLIMIT_AS)", max_gb)
+    except (ValueError, OSError) as exc:
+        log.warning("Could not apply %.1f GB memory cap: %s", max_gb, exc)
+
+
 GPHOTO_API_BASE = os.environ.get("GPHOTO_API_BASE", "http://10.0.0.69:8080").rstrip("/")
 OUTPUT_BASE_DIR = Path(os.environ.get("ASTROCAP_OUTDIR", "./captures"))
 SESSIONS_BASE_DIR = OUTPUT_BASE_DIR / "sessions"
@@ -1519,6 +1549,7 @@ def platesolve_start() -> tuple[Any, int] | Any:
     exposure_seconds = parse_int(data.get("exposure_seconds"), 30)
     iso = (data.get("iso") or "400").strip()
     search_radius_deg = float(data.get("search_radius_deg") or 1.5)
+    hemisphere = str(data.get("hemisphere") or "north").strip().lower()
 
     if not target_name:
         return jsonify({"error": "target_name is required (e.g. M31, NGC7000)"}), 400
@@ -1526,7 +1557,15 @@ def platesolve_start() -> tuple[Any, int] | Any:
         return jsonify({"error": "exposure_seconds must be >= 1"}), 400
 
     try:
-        if use_siril_backend:
+        if use_local_backend:
+            task_id = astap_annotate.start_platesolve_astap(
+                target_name=target_name,
+                exposure_seconds=exposure_seconds,
+                iso=iso,
+                search_radius_deg=search_radius_deg,
+                hemisphere=hemisphere,
+            )
+        elif use_siril_backend:
             task_id = siril_annotate.start_platesolve_siril(
                 target_name=target_name,
                 exposure_seconds=exposure_seconds,
@@ -1550,6 +1589,7 @@ def platesolve_upload() -> tuple[Any, int] | Any:
     """Upload a file and plate-solve it (no live capture)."""
     target_name = (request.form.get("target_name") or "").strip()
     search_radius_deg = float(request.form.get("search_radius_deg") or 1.5)
+    hemisphere = str(request.form.get("hemisphere") or "north").strip().lower()
 
     if not target_name:
         return jsonify({"error": "target_name is required"}), 400
@@ -1569,7 +1609,14 @@ def platesolve_upload() -> tuple[Any, int] | Any:
     f.save(str(dest))
 
     try:
-        if use_siril_backend:
+        if use_local_backend:
+            task_id = astap_annotate.start_platesolve_from_file_astap(
+                file_path=str(dest),
+                target_name=target_name,
+                search_radius_deg=search_radius_deg,
+                hemisphere=hemisphere,
+            )
+        elif use_siril_backend:
             task_id = siril_annotate.start_platesolve_from_file_siril(
                 file_path=str(dest),
                 target_name=target_name,
@@ -1588,7 +1635,9 @@ def platesolve_upload() -> tuple[Any, int] | Any:
 
 @app.route("/platesolve/api/status/<task_id>")
 def platesolve_status(task_id: str) -> Any:
-    if use_siril_backend:
+    if use_local_backend:
+        result = astap_annotate.get_task_result(task_id)
+    elif use_siril_backend:
         result = siril_annotate.get_task_result(task_id)
     else:
         result = platesolve.get_task_result(task_id)
@@ -1599,7 +1648,9 @@ def platesolve_status(task_id: str) -> Any:
 
 @app.route("/platesolve/api/annotated/<task_id>")
 def platesolve_annotated(task_id: str) -> Any:
-    if use_siril_backend:
+    if use_local_backend:
+        result = astap_annotate.get_task_result(task_id)
+    elif use_siril_backend:
         result = siril_annotate.get_task_result(task_id)
     else:
         result = platesolve.get_task_result(task_id)
@@ -1613,7 +1664,9 @@ def platesolve_annotated(task_id: str) -> Any:
 
 @app.route("/platesolve/api/capture_raw/<task_id>")
 def platesolve_capture_raw(task_id: str) -> Any:
-    if use_siril_backend:
+    if use_local_backend:
+        result = astap_annotate.get_task_result(task_id)
+    elif use_siril_backend:
         result = siril_annotate.get_task_result(task_id)
     else:
         result = platesolve.get_task_result(task_id)
@@ -1626,11 +1679,15 @@ def platesolve_capture_raw(task_id: str) -> Any:
 
 
 if __name__ == "__main__":
+    _apply_memory_limit(ASTROCAP_MAX_RAM_GB)
     OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
     SESSIONS_BASE_DIR.mkdir(parents=True, exist_ok=True)
     if "--siril" in sys.argv:
         use_siril_backend = True
         print("Using Siril backend for plate-solving and annotation")
+    if "--local" in sys.argv:
+        use_local_backend = True
+        print("Using local (offline) backend for plate-solving and annotation")
     print(
         f"""
 AstroCap listening on http://0.0.0.0:{SERVER_PORT}
