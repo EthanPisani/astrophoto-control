@@ -39,6 +39,7 @@
     fileInput: $("#fileInput"),
     fileDrop: $("#fileDrop"),
     fileLabel: $("#fileLabel"),
+    hemisphereSegmented: $("#hemisphereSegmented"),
 
     // progress
     progressTitle: $("#progressTitle"),
@@ -78,6 +79,7 @@
     isRunning: false,
     sourceMode: "capture",   // "capture" | "upload"
     selectedFile: null,
+    hemisphere: "north",     // "north" | "south" | "auto"
   };
 
   // -----------------------------------------------------------------
@@ -222,6 +224,18 @@
     });
   }
 
+  function initHemisphereMode() {
+    if (!els.hemisphereSegmented) return;
+    const btns = els.hemisphereSegmented.querySelectorAll(".seg-btn");
+    btns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        btns.forEach((b) => b.setAttribute("aria-pressed", "false"));
+        btn.setAttribute("aria-pressed", "true");
+        state.hemisphere = btn.getAttribute("data-hemi") || "north";
+      });
+    });
+  }
+
   // -----------------------------------------------------------------
   // Panel switching
   // -----------------------------------------------------------------
@@ -251,6 +265,7 @@
     const cfg = {
       target_name: (els.targetName?.value || "").trim(),
       search_radius_deg: parseFloat(els.searchRadius?.value || "1.5"),
+      hemisphere: state.hemisphere,
     };
     if (state.sourceMode === "capture") {
       cfg.exposure_seconds = parseInt(els.solveExposure?.value || "0", 10) || 30;
@@ -299,6 +314,7 @@
         fd.append("file", state.selectedFile);
         fd.append("target_name", cfg.target_name);
         fd.append("search_radius_deg", String(cfg.search_radius_deg));
+        fd.append("hemisphere", state.hemisphere);
 
         const resp = await fetch("/platesolve/api/upload", {
           method: "POST",
@@ -547,6 +563,7 @@
     refreshCameraHealth();
     initSourceMode();
     initFileInput();
+    initHemisphereMode();
     syncSourceMode();
 
     els.solveForm?.addEventListener("submit", (e) => {

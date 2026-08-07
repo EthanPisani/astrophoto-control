@@ -126,6 +126,20 @@
               </div>
             </div>
 
+            <!-- Hemisphere selector for blind solving speed -->
+            <div class="field">
+              <span class="field-label">Hemisphere</span>
+              <div class="segmented" id="hemisphereSegmented" role="group" aria-label="Hemisphere">
+                <button type="button" class="seg-btn" data-hemi="north" aria-pressed="true">Northern</button>
+                <button type="button" class="seg-btn" data-hemi="south" aria-pressed="false">Southern</button>
+                <button type="button" class="seg-btn" data-hemi="auto" aria-pressed="false">Auto (all-sky)</button>
+              </div>
+              <div class="field-hint">
+                Narrows the initial blind solve to one hemisphere for speed.
+                "Auto" searches the entire sky (slower, ~3–5s).
+              </div>
+            </div>
+
             <details class="advanced">
               <summary>How plate solving works</summary>
               <div class="field-hint" style="margin-top:12px; line-height:1.6;">
