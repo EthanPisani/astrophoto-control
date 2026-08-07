@@ -42,18 +42,22 @@ RUN wget -q "https://sourceforge.net/projects/astap-program/files/linux_installe
     chmod +x /usr/local/bin/astap_cli && \
     rm -rf /tmp/astap_amd64.deb /tmp/astap_extract
 
-# D50 star database (~200 MB compressed -> ~500 MB extracted)
-RUN wget -q "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" \
+# D50 star database (~200 MB)
+# SourceForge /download links redirect; --content-disposition ensures
+# we get the real file, not an HTML mirror-select page.
+RUN wget -q --content-disposition \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" \
          -O /tmp/d50.deb && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
-    cp /tmp/d50_extract/opt/astap/*.290 /opt/astap/ && \
+    find /tmp/d50_extract -name '*.290' -exec cp {} /opt/astap/ \; && \
     rm -rf /tmp/d50.deb /tmp/d50_extract
 
 # G05 wider-field blind-solve database
-RUN wget -q "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" \
+RUN wget -q --content-disposition \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" \
          -O /tmp/g05.deb && \
     dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
-    cp /tmp/g05_extract/opt/astap/*.290 /opt/astap/ && \
+    find /tmp/g05_extract -name '*.290' -exec cp {} /opt/astap/ \; && \
     rm -rf /tmp/g05.deb /tmp/g05_extract
 
 # -- Python dependencies --------------------------------------------
