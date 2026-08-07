@@ -43,22 +43,20 @@ RUN wget -q --content-disposition \
     rm -rf /tmp/astap_amd64.deb /tmp/astap_extract
 
 # D50 star database (~200 MB)
-# SourceForge /download links redirect; --content-disposition ensures
-# we get the real file, not an HTML mirror-select page.
-RUN mkdir -p /opt/astap && \
-    wget -q --content-disposition \
-         "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" \
-         -O /tmp/d50.deb && \
+# astap_cli searches: its own dir → /opt/astap → /usr/share/astap/data
+# We put databases at the canonical path and symlink for compatibility.
+RUN mkdir -p /usr/share/astap/data && \
+    wget -q -O /tmp/d50.deb \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
-    find /tmp/d50_extract -name '*.290' -exec cp {} /opt/astap/ \; && \
+    find /tmp/d50_extract -name '*.290' -exec cp {} /usr/share/astap/data/ \; && \
     rm -rf /tmp/d50.deb /tmp/d50_extract
 
 # G05 wider-field blind-solve database
-RUN wget -q --content-disposition \
-         "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" \
-         -O /tmp/g05.deb && \
+RUN wget -q -O /tmp/g05.deb \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" && \
     dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
-    find /tmp/g05_extract -name '*.290' -exec cp {} /opt/astap/ \; && \
+    find /tmp/g05_extract -name '*.290' -exec cp {} /usr/share/astap/data/ \; && \
     rm -rf /tmp/g05.deb /tmp/g05_extract
 
 # -- Python dependencies --------------------------------------------
@@ -106,8 +104,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Copy ASTAP binary + star databases from builder ----------------
-# astap_cli is included in the /usr/local/bin directory copy below
-COPY --from=builder /opt/astap /opt/astap
+# astap_cli is included in the /usr/local/bin directory copy below.
+# Databases live at /usr/share/astap/data; /opt/astap is a symlink
+# so both search paths astap_cli checks resolve to the same files.
+COPY --from=builder /usr/share/astap/data /usr/share/astap/data
+RUN ln -s /usr/share/astap/data /opt/astap
 
 # -- Copy Python site-packages from builder -------------------------
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
