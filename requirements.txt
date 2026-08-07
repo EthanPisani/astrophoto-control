@@ -1,0 +1,19 @@
+# Core web framework
+flask>=2.3,<4
+requests>=2.28,<3
+
+# Image / RAW processing
+numpy>=1.24,<2
+Pillow>=9.4,<12
+rawpy>=0.18,<1
+opencv-python-headless>=4.7,<5
+
+# Astronomy
+astropy>=5.2,<7
+scipy>=1.10,<2
+
+# Plate-solving backends (optional, install what you need)
+photutils>=1.8,<2        # local_annotate.py star detection
+twirl>=0.2,<1            # local_annotate.py asterism matching
+astroquery>=0.4,<1       # online catalog queries / DB builder
+matplotlib>=3.7,<4       # siril_annotate.py rendering
