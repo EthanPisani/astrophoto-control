@@ -33,15 +33,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Install ASTAP --------------------------------------------------
-# Fetch the latest ASTAP CLI from the official site, extract the
-# binary. Also pull the D50 and G05 star databases.
-RUN mkdir -p /opt/astap && \
-    wget -q "https://www.hnsky.org/astap_linux_x64_december_22_2024.zip" \
-         -O /tmp/astap.zip && \
-    cd /tmp && unzip -q astap.zip && \
-    cp astap/astap_cli /usr/local/bin/ && \
+# Download the official amd64 .deb, extract astap_cli from it.
+# The .deb is the primary distribution and always has the latest CLI.
+RUN wget -q "https://sourceforge.net/projects/astap-program/files/linux_installer/astap_amd64.deb/download" \
+         -O /tmp/astap_amd64.deb && \
+    dpkg-deb -x /tmp/astap_amd64.deb /tmp/astap_extract && \
+    cp /tmp/astap_extract/opt/astap/astap_cli /usr/local/bin/ && \
     chmod +x /usr/local/bin/astap_cli && \
-    rm -rf /tmp/astap /tmp/astap.zip
+    rm -rf /tmp/astap_amd64.deb /tmp/astap_extract
 
 # D50 star database (~200 MB compressed -> ~500 MB extracted)
 RUN wget -q "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" \
