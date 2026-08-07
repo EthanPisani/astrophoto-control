@@ -25,17 +25,17 @@
 FROM python:3.12-slim-bookworm AS builder
 
 # -- Install system packages ----------------------------------------
-# wget, unzip: for downloading/extracting ASTAP
+# wget, ca-certificates, dpkg: for downloading/extracting ASTAP .deb
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
-    unzip \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Install ASTAP --------------------------------------------------
 # Download the official amd64 .deb, extract astap_cli from it.
 # The .deb is the primary distribution and always has the latest CLI.
-RUN wget -q "https://sourceforge.net/projects/astap-program/files/linux_installer/astap_amd64.deb/download" \
+RUN wget -q --content-disposition \
+         "https://sourceforge.net/projects/astap-program/files/linux_installer/astap_amd64.deb/download" \
          -O /tmp/astap_amd64.deb && \
     dpkg-deb -x /tmp/astap_amd64.deb /tmp/astap_extract && \
     cp /tmp/astap_extract/opt/astap/astap_cli /usr/local/bin/ && \
@@ -45,7 +45,8 @@ RUN wget -q "https://sourceforge.net/projects/astap-program/files/linux_installe
 # D50 star database (~200 MB)
 # SourceForge /download links redirect; --content-disposition ensures
 # we get the real file, not an HTML mirror-select page.
-RUN wget -q --content-disposition \
+RUN mkdir -p /opt/astap && \
+    wget -q --content-disposition \
          "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" \
          -O /tmp/d50.deb && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
@@ -105,7 +106,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Copy ASTAP binary + star databases from builder ----------------
-COPY --from=builder /usr/local/bin/astap_cli /usr/local/bin/astap_cli
+# astap_cli is included in the /usr/local/bin directory copy below
 COPY --from=builder /opt/astap /opt/astap
 
 # -- Copy Python site-packages from builder -------------------------
