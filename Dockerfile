@@ -73,7 +73,6 @@ RUN pip install --no-cache-dir -r /build/requirements.txt
 COPY build_constellation_lines.py /build/
 COPY build_dso_catalogs.py /build/
 COPY build_star_catalogs.py /build/
-COPY ngc_raw.csv addendum_raw.csv /build/
 # Hand-curated angular-size overrides for well-known large nebulae
 COPY large_dso_overrides.csv /build/
 
@@ -125,7 +124,6 @@ COPY *.py /app/
 COPY requirements.txt /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
-COPY ngc_raw.csv addendum_raw.csv /app/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
