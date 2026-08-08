@@ -25,11 +25,12 @@
 FROM python:3.12-slim-bookworm AS builder
 
 # -- Install system packages ----------------------------------------
-# curl: handles SourceForge redirect chains better than wget
+# xz-utils: needed by dpkg-deb -x to decompress .tar.xz inside .deb
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Install ASTAP --------------------------------------------------
