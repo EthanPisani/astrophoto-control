@@ -31,6 +31,9 @@ services:
       - GPHOTO_API_BASE=${GPHOTO_API_BASE:-http://10.0.0.69:8080}
       - ASTROCAP_SOLVER_BACKEND=${ASTROCAP_SOLVER_BACKEND:-local}
       - ASTROCAP_HTTP_TIMEOUT=${ASTROCAP_HTTP_TIMEOUT:-20}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
+      - GUNICORN_TIMEOUT=${GUNICORN_TIMEOUT:-120}
     restart: unless-stopped
     # Give astap_cli enough time to shut down gracefully
     stop_grace_period: 30s

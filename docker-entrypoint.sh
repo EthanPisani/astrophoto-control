@@ -70,22 +70,18 @@ else
     echo "  Catalogs: OK (${DSO_DIR}, ${STAR_DIR})"
 fi
 
-# -- Determine solver backend flag ----------------------------------
-BACKEND="${ASTROCAP_SOLVER_BACKEND:-local}"
-case "$BACKEND" in
-    local|astap)
-        SOLVER_FLAG="--local"
-        ;;
-    siril)
-        SOLVER_FLAG="--siril"
-        ;;
-    *)
-        # default (online platesolve.py backend) — no flag
-        SOLVER_FLAG=""
-        ;;
-esac
-
 echo ""
 echo "=== Launching AstroCap on 0.0.0.0:${ASTROCAP_PORT:-7777} ==="
 
-exec python /app/app.py $SOLVER_FLAG
+# gthread worker class gives good throughput for the I/O-bound camera
+# bridge calls (HTTP to nikon_bulb_server) while keeping memory low.
+exec gunicorn \
+    --bind "0.0.0.0:${ASTROCAP_PORT:-7777}" \
+    --workers "${GUNICORN_WORKERS:-2}" \
+    --threads "${GUNICORN_THREADS:-4}" \
+    --timeout "${GUNICORN_TIMEOUT:-120}" \
+    --worker-class gthread \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output \
+    app:app

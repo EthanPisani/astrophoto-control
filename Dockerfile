@@ -43,20 +43,24 @@ RUN wget -q --content-disposition \
     rm -rf /tmp/astap_amd64.deb /tmp/astap_extract
 
 # D50 star database (~200 MB)
-# astap_cli searches: its own dir → /opt/astap → /usr/share/astap/data
-# We put databases at the canonical path and symlink for compatibility.
+# astap_cli searches: own dir → /opt/astap → /usr/share/astap/data.
+# SourceForge can be slow — retry up to 5 times, verify after extract.
 RUN mkdir -p /usr/share/astap/data && \
-    wget -q -O /tmp/d50.deb \
+    wget -q -O /tmp/d50.deb --tries=5 --retry-connrefused --timeout=120 \
          "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
-    find /tmp/d50_extract -name '*.290' -exec cp {} /usr/share/astap/data/ \; && \
-    rm -rf /tmp/d50.deb /tmp/d50_extract
+    find /tmp/d50_extract \( -name '*.290' -o -name '*.1476' \) \
+         -exec cp {} /usr/share/astap/data/ \; && \
+    rm -rf /tmp/d50.deb /tmp/d50_extract && \
+    ls /usr/share/astap/data/*.290 /usr/share/astap/data/*.1476 >/dev/null 2>&1 \
+    || (echo "FATAL: No star database files extracted from D50 .deb" >&2; exit 1)
 
 # G05 wider-field blind-solve database
-RUN wget -q -O /tmp/g05.deb \
+RUN wget -q -O /tmp/g05.deb --tries=5 --retry-connrefused --timeout=120 \
          "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" && \
     dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
-    find /tmp/g05_extract -name '*.290' -exec cp {} /usr/share/astap/data/ \; && \
+    find /tmp/g05_extract \( -name '*.290' -o -name '*.1476' \) \
+         -exec cp {} /usr/share/astap/data/ \; && \
     rm -rf /tmp/g05.deb /tmp/g05_extract
 
 # -- Python dependencies --------------------------------------------
@@ -123,6 +127,7 @@ COPY *.py /app/
 COPY requirements.txt /app/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
+COPY gunicorn.conf.py /app/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
@@ -135,12 +140,16 @@ ENV ASTROCAP_MAX_RAM_GB=4
 ENV GPHOTO_API_BASE=http://10.0.0.69:8080
 # Use the fully-offline ASTAP backend by default
 ENV ASTROCAP_SOLVER_BACKEND=local
+# Gunicorn settings (override for your hardware)
+ENV GUNICORN_WORKERS=2
+ENV GUNICORN_THREADS=4
+ENV GUNICORN_TIMEOUT=120
 
 EXPOSE 7777
 VOLUME ["/data"]
 
-# Health check: ensure Flask is responding
+# Health check: gunicorn returns 200 from the /health/api endpoint
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7777/health/api')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7777/health/api')" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -1,5 +1,6 @@
 # Core web framework
 flask>=2.3,<4
+gunicorn>=22,<24
 requests>=2.28,<3
 
 # Image / RAW processing

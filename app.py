@@ -26,6 +26,15 @@ import astap_annotate
 import auto_flat_exposure
 use_siril_backend = False
 use_local_backend = False
+
+# When running under gunicorn, sys.argv won't have our flags.
+# Check the env var instead so the solver backend is configured
+# regardless of how the process is launched.
+_solver_env = (os.environ.get("ASTROCAP_SOLVER_BACKEND") or "").strip().lower()
+if _solver_env in ("local", "astap"):
+    use_local_backend = True
+elif _solver_env == "siril":
+    use_siril_backend = True
  
 # Hard backstop on total process memory. This is deliberately blunt: it
 # doesn't try to guess which code path might over-allocate (that's what
