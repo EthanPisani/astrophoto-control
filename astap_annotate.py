@@ -152,10 +152,10 @@ ASTAP_BLIND_TIMEOUT_SEC = int(os.environ.get("ASTAP_BLIND_TIMEOUT_SEC", "8"))
 ASTAP_HEMISPHERE = os.environ.get("ASTAP_HEMISPHERE", "north").strip().lower()
 
 DSO_CATALOG_DIR = Path(os.path.expanduser(
-    os.environ.get("ASTAP_DSO_CATALOG_DIR", "/home/ethan/.local_annotate/dso-catalogs")
+    os.environ.get("ASTAP_DSO_CATALOG_DIR", "~/.local_annotate/dso-catalogs")
 ))
 STAR_CATALOG_DIR = Path(os.path.expanduser(
-    os.environ.get("ASTAP_STAR_CATALOG_DIR", "/home/ethan/.local_annotate/star-catalogs")
+    os.environ.get("ASTAP_STAR_CATALOG_DIR", "~/.local_annotate/star-catalogs")
 ))
 
 _DSO_CATALOG_FILES: list[tuple[str, str]] = [
