@@ -129,7 +129,7 @@ import cv2
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
-from astropy.coordinates import Angle
+from astropy.coordinates import Angle, SkyCoord
 import astropy.units as u
 from PIL import Image, ImageDraw, ImageFont
 import threading
@@ -213,6 +213,24 @@ _CATALOG_PRIORITY = {"messier": 0, "ngc": 1, "ic": 2, "star": 3, "constellation"
 
 def _catalog_priority(catalog_kind: str) -> int:
     return _CATALOG_PRIORITY.get((catalog_kind or "").strip().lower(), _CATALOG_PRIORITY["constellation"])
+
+
+# ---------------------------------------------------------------------------
+# Angular distance helper
+# ---------------------------------------------------------------------------
+
+def _angular_separation_arcsec(ra1_deg: Optional[float], dec1_deg: Optional[float],
+                               ra2_deg: Optional[float], dec2_deg: Optional[float]) -> float:
+    """Angular distance between two sky positions in arcseconds.
+    Returns -1 if either point is None."""
+    if ra1_deg is None or dec1_deg is None or ra2_deg is None or dec2_deg is None:
+        return -1.0
+    try:
+        c1 = SkyCoord(ra=ra1_deg, dec=dec1_deg, unit=u.deg)
+        c2 = SkyCoord(ra=ra2_deg, dec=dec2_deg, unit=u.deg)
+        return float(c1.separation(c2).arcsecond)
+    except Exception:
+        return -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -776,10 +794,12 @@ def _stretch_to_8bit_rgb(rgb16: np.ndarray) -> np.ndarray:
 def _draw_target_indicator(draw: ImageDraw.ImageDraw, width: int, height: int,
                            target_ra_deg: float, target_dec_deg: float,
                            target_name: str,
+                           target_offset_arcsec: float,
                            border_offset_x: int, border_offset_y: int) -> None:
     """Draw a red circle if the target is in the middle 3/4 of the frame,
     or a large red arrow at the frame edge pointing toward the target if
-    it lies outside the frame.
+    it lies outside the frame.  Also renders the angular offset below
+    the label (e.g. \"2.3°\" or \"145\\\"\").
 
     Uses _pixel_scale_arcmin_cache[0] and the WCS from the most recent
     solve (accessed via _cached_wcs_path global set in bake_png_annotations).
@@ -812,6 +832,17 @@ def _draw_target_indicator(draw: ImageDraw.ImageDraw, width: int, height: int,
     circle_color = _CATALOG_COLOR["target_circle"] + (220,)  # ~0.86 alpha
     arrow_color = _CATALOG_COLOR["target_arrow"] + (230,)
     font = _load_font(42)
+    small_font = _load_font(28)
+
+    # Format angular offset as human-readable text
+    offset_text = ""
+    if target_offset_arcsec > 0:
+        if target_offset_arcsec >= 3600.0:
+            offset_text = f"{target_offset_arcsec / 3600.0:.1f}°"
+        elif target_offset_arcsec >= 60.0:
+            offset_text = f"{target_offset_arcsec / 60.0:.1f}'"
+        else:
+            offset_text = f"{target_offset_arcsec:.0f}\""
 
     if in_middle:
         # --- Target on screen: draw large red circle ---
@@ -830,6 +861,12 @@ def _draw_target_indicator(draw: ImageDraw.ImageDraw, width: int, height: int,
         bbox = draw.textbbox((0, 0), label, font=font)
         tw = bbox[2] - bbox[0]
         draw.text((tx - tw / 2, ty + radius + 8), label, fill=circle_color, font=font)
+        # Offset below label
+        if offset_text:
+            obox = draw.textbbox((0, 0), offset_text, font=small_font)
+            otw = obox[2] - obox[0]
+            draw.text((tx - otw / 2, ty + radius + 8 + bbox[3] - bbox[1] + 4),
+                      offset_text, fill=circle_color, font=small_font)
         log.info("Target '%s' in frame at pixel (%.0f, %.0f) — circle drawn", label, tx, ty)
     else:
         # --- Target off screen: draw large arrow at edge ---
@@ -879,6 +916,12 @@ def _draw_target_indicator(draw: ImageDraw.ImageDraw, width: int, height: int,
         bbox = draw.textbbox((0, 0), label, font=font)
         tw = bbox[2] - bbox[0]
         draw.text((label_x - tw / 2, label_y - 21), label, fill=arrow_color, font=font)
+        # Offset below label
+        if offset_text:
+            obox = draw.textbbox((0, 0), offset_text, font=small_font)
+            otw = obox[2] - obox[0]
+            draw.text((label_x - otw / 2, label_y - 21 + bbox[3] - bbox[1] + 4),
+                      offset_text, fill=arrow_color, font=small_font)
 
         angle_deg = _math.degrees(_math.atan2(dy, dx))
         log.info("Target '%s' off-screen at bearing %.0f° — arrow drawn at (%.0f, %.0f)",
@@ -933,6 +976,7 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
                           target_ra_deg: Optional[float] = None,
                           target_dec_deg: Optional[float] = None,
                           target_name: str = "",
+                          target_offset_arcsec: float = -1.0,
                           fits_path_hint: str = "") -> str:
     """PIL-based bake matching siril_annotate.py's visual style:
       - constellation lines (cyan, thin, alpha ~0.65), drawn first
@@ -1147,6 +1191,7 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
         _draw_target_indicator(
             draw, width, height,
             target_ra_deg, target_dec_deg, target_name,
+            target_offset_arcsec,
             border_offset_x, border_offset_y,
         )
 
@@ -1381,10 +1426,15 @@ def run_astap_annotation(config: dict[str, Any]) -> tuple[Optional[dict[str, Any
     annotations, constellation_segments = map_and_annotate(fits_path, img_shape, wcs_metadata["pixel_scale_arcmin"])
 
     try:
+        offset_arcsec = _angular_separation_arcsec(
+            wcs_metadata.get("ra_deg"), wcs_metadata.get("dec_deg"),
+            target_ra_deg, target_dec_deg,
+        )
         output_path = bake_png_annotations(
             rgb16, annotations, constellation_segments, output_image,
             target_ra_deg=target_ra_deg, target_dec_deg=target_dec_deg,
             target_name=str(config.get("target_name", "") or ""),
+            target_offset_arcsec=offset_arcsec,
             fits_path_hint=fits_path,
         )
     except Exception:
@@ -1494,15 +1544,19 @@ def _run_astap_pipeline(
         result.n_stars_matched = int(wcs_metadata.get("n_stars_matched", 0))
         result.annotations = dso_annotations
         result.wcs_json = "{}"
+        result.target_offset_arcsec = _angular_separation_arcsec(
+            result.solved_ra, result.solved_dec, ra, dec,
+        )
 
         result.success = True
         result.status = "done"
         log.info(
             "Local plate solve complete: center=(%.4f, %.4f) scale=%.3f\"/px "
-            "rotation=%.2f field=%.1f'x%.1f' stars=%d/%d objects=%d",
+            "rotation=%.2f field=%.1f'x%.1f' stars=%d/%d objects=%d offset=%.0f\"",
             result.solved_ra, result.solved_dec, result.solved_scale,
             result.solved_rotation, result.field_width_arcmin, result.field_height_arcmin,
             result.n_stars_matched, result.n_stars_detected, len(result.annotations),
+            result.target_offset_arcsec,
         )
 
     except Exception as exc:
@@ -1724,15 +1778,19 @@ def _run_astap_from_file(
         result.n_stars_matched = int(wcs_metadata.get("n_stars_matched", 0))
         result.annotations = dso_annotations
         result.wcs_json = "{}"
+        result.target_offset_arcsec = _angular_separation_arcsec(
+            result.solved_ra, result.solved_dec, ra, dec,
+        )
 
         result.success = True
         result.status = "done"
         log.info(
             "Local plate solve from file complete: center=(%.4f, %.4f) scale=%.3f\"/px "
-            "rotation=%.2f field=%.1f'x%.1f' stars=%d/%d objects=%d",
+            "rotation=%.2f field=%.1f'x%.1f' stars=%d/%d objects=%d offset=%.0f\"",
             result.solved_ra, result.solved_dec, result.solved_scale,
             result.solved_rotation, result.field_width_arcmin, result.field_height_arcmin,
             result.n_stars_matched, result.n_stars_detected, len(result.annotations),
+            result.target_offset_arcsec,
         )
 
     except Exception as exc:
