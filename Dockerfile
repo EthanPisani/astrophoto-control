@@ -45,26 +45,30 @@ RUN curl -L --retry 3 --connect-timeout 30 \
 
 # D50 star database (~826 MB .deb, extracts to opt/astap/*.1476)
 # astap_cli searches: own dir → /opt/astap → /usr/share/astap/data.
-# curl -L follows the SourceForge mirror redirect chain properly.
-RUN mkdir -p /usr/share/astap/data && \
-    curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
-         -o /tmp/d50.deb \
-         "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" && \
-    dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
-    cp /tmp/d50_extract/opt/astap/*.1476 /usr/share/astap/data/ 2>/dev/null; \
-    cp /tmp/d50_extract/opt/astap/*.290 /usr/share/astap/data/ 2>/dev/null; \
-    rm -rf /tmp/d50.deb /tmp/d50_extract && \
-    ls /usr/share/astap/data/*.1476 /usr/share/astap/data/*.290 >/dev/null 2>&1 \
-    || (echo "FATAL: No star database files extracted from D50 .deb" >&2; exit 1)
+RUN mkdir -p /usr/share/astap/data /tmp/db
+RUN curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
+         -o /tmp/db/d50.deb \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download"
+RUN dpkg-deb -x /tmp/db/d50.deb /tmp/db/d50_extract && \
+    echo "=== Extracted files ===" && \
+    find /tmp/db/d50_extract -type f | head -20 && \
+    echo "=== Copying to /usr/share/astap/data ===" && \
+    cp -v /tmp/db/d50_extract/opt/astap/*.1476 /usr/share/astap/data/ && \
+    echo "=== Copied OK, cleaning up ===" && \
+    rm -rf /tmp/db && \
+    ls /usr/share/astap/data/
 
 # G05 wider-field blind-solve database
+RUN mkdir -p /tmp/db
 RUN curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
-         -o /tmp/g05.deb \
-         "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" && \
-    dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
-    cp /tmp/g05_extract/opt/astap/*.1476 /usr/share/astap/data/ 2>/dev/null; \
-    cp /tmp/g05_extract/opt/astap/*.290 /usr/share/astap/data/ 2>/dev/null; \
-    rm -rf /tmp/g05.deb /tmp/g05_extract
+         -o /tmp/db/g05.deb \
+         "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download"
+RUN dpkg-deb -x /tmp/db/g05.deb /tmp/db/g05_extract && \
+    cp /tmp/db/g05_extract/opt/astap/*.1476 /usr/share/astap/data/ 2>/dev/null || true; \
+    cp /tmp/db/g05_extract/opt/astap/*.290 /usr/share/astap/data/ 2>/dev/null || true; \
+    rm -rf /tmp/db && \
+    echo "=== Database files ===" && \
+    ls /usr/share/astap/data/
 
 # -- Python dependencies --------------------------------------------
 COPY requirements.txt /build/requirements.txt
