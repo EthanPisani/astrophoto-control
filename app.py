@@ -67,6 +67,7 @@ def _apply_memory_limit(max_gb: float) -> None:
 
 GPHOTO_API_BASE = os.environ.get("GPHOTO_API_BASE", "http://10.0.0.69:8080").rstrip("/")
 OUTPUT_BASE_DIR = Path(os.environ.get("ASTROCAP_OUTDIR", "./captures"))
+LOCAL_OUTPUT_BASE_DIR = Path(os.environ.get("ASTROCAP_LOCAL_OUTDIR", "./local_save"))
 SESSIONS_BASE_DIR = OUTPUT_BASE_DIR / "sessions"
 CALIBRATION_DIR = OUTPUT_BASE_DIR / "calibration"
 DB_PATH = Path(os.environ.get("ASTROCAP_DB_PATH", str(OUTPUT_BASE_DIR / "astrocap.db")))
@@ -635,6 +636,31 @@ class SessionManager:
                         local_path = output_dir / local_name
                         with self._call("download_capture_file", session=session_id, seq=seq, capture=capture_id):
                             self.api_client.download_capture_file(capture_id, local_path)
+                        
+                        try:
+                            # Use the script's existing function to get the current astronomical night string
+                            current_night = get_session_date()
+                            tracker_file = LOCAL_OUTPUT_BASE_DIR / ".current_night"
+                            
+                            saved_night = ""
+                            if tracker_file.exists():
+                                saved_night = tracker_file.read_text().strip()
+                                
+                            # If it's a new astronomical night, wipe the directory to start fresh
+                            if saved_night and saved_night != current_night:
+                                shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
+                                
+                            # Recreate the directory if it was just deleted (or if it never existed)
+                            LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+                            
+                            # Update the tracker file with the new night
+                            if saved_night != current_night:
+                                tracker_file.write_text(current_night)
+                                
+                            # Copy the newly downloaded file to the local disk
+                            shutil.copy2(local_path, LOCAL_OUTPUT_BASE_DIR / local_name)
+                        except Exception as exc:
+                            log.warning("Failed to save copy to local disk: %s", exc)
                         try:
                             with self._call("mark_downloaded", session=session_id, seq=seq, capture=capture_id):
                                 self.api_client.mark_downloaded(capture_id)
@@ -919,7 +945,7 @@ def get_session_date(dt: datetime | None = None) -> str:
     
     Session Definition:
     - Starts at 17:00 (5 PM)
-    - Ends at 11:00 (11 AM) the next day
+    - Ends at 13:00 (3 PM) the next day
     - The label corresponds to the *starting* date of that window.
     
     Examples:
