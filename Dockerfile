@@ -43,19 +43,18 @@ RUN curl -L --retry 3 --connect-timeout 30 \
     chmod +x /usr/local/bin/astap_cli && \
     rm -rf /tmp/astap_amd64.deb /tmp/astap_extract
 
-# D50 star database (~200 MB)
+# D50 star database (~826 MB .deb, extracts to opt/astap/*.1476)
 # astap_cli searches: own dir → /opt/astap → /usr/share/astap/data.
-# curl -L follows the SourceForge mirror redirect chain properly;
-# wget stops at the HTML mirror-select page.
+# curl -L follows the SourceForge mirror redirect chain properly.
 RUN mkdir -p /usr/share/astap/data && \
     curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
          -o /tmp/d50.deb \
          "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
-    find /tmp/d50_extract \( -name '*.290' -o -name '*.1476' \) \
-         -exec cp {} /usr/share/astap/data/ \; && \
+    cp /tmp/d50_extract/opt/astap/*.1476 /usr/share/astap/data/ 2>/dev/null; \
+    cp /tmp/d50_extract/opt/astap/*.290 /usr/share/astap/data/ 2>/dev/null; \
     rm -rf /tmp/d50.deb /tmp/d50_extract && \
-    ls /usr/share/astap/data/*.290 /usr/share/astap/data/*.1476 >/dev/null 2>&1 \
+    ls /usr/share/astap/data/*.1476 /usr/share/astap/data/*.290 >/dev/null 2>&1 \
     || (echo "FATAL: No star database files extracted from D50 .deb" >&2; exit 1)
 
 # G05 wider-field blind-solve database
@@ -63,8 +62,8 @@ RUN curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
          -o /tmp/g05.deb \
          "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" && \
     dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
-    find /tmp/g05_extract \( -name '*.290' -o -name '*.1476' \) \
-         -exec cp {} /usr/share/astap/data/ \; && \
+    cp /tmp/g05_extract/opt/astap/*.1476 /usr/share/astap/data/ 2>/dev/null; \
+    cp /tmp/g05_extract/opt/astap/*.290 /usr/share/astap/data/ 2>/dev/null; \
     rm -rf /tmp/g05.deb /tmp/g05_extract
 
 # -- Python dependencies --------------------------------------------
