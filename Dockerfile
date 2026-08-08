@@ -25,18 +25,18 @@
 FROM python:3.12-slim-bookworm AS builder
 
 # -- Install system packages ----------------------------------------
-# wget, ca-certificates, dpkg: for downloading/extracting ASTAP .deb
+# curl: handles SourceForge redirect chains better than wget
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
+    curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # -- Install ASTAP --------------------------------------------------
 # Download the official amd64 .deb, extract astap_cli from it.
-# The .deb is the primary distribution and always has the latest CLI.
-RUN wget -q --content-disposition \
-         "https://sourceforge.net/projects/astap-program/files/linux_installer/astap_amd64.deb/download" \
-         -O /tmp/astap_amd64.deb && \
+RUN curl -L --retry 3 --connect-timeout 30 \
+         -o /tmp/astap_amd64.deb \
+         "https://sourceforge.net/projects/astap-program/files/linux_installer/astap_amd64.deb/download" && \
     dpkg-deb -x /tmp/astap_amd64.deb /tmp/astap_extract && \
     cp /tmp/astap_extract/opt/astap/astap_cli /usr/local/bin/ && \
     chmod +x /usr/local/bin/astap_cli && \
@@ -44,9 +44,11 @@ RUN wget -q --content-disposition \
 
 # D50 star database (~200 MB)
 # astap_cli searches: own dir → /opt/astap → /usr/share/astap/data.
-# SourceForge can be slow — retry up to 5 times, verify after extract.
+# curl -L follows the SourceForge mirror redirect chain properly;
+# wget stops at the HTML mirror-select page.
 RUN mkdir -p /usr/share/astap/data && \
-    wget -q -O /tmp/d50.deb --tries=5 --retry-connrefused --timeout=120 \
+    curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
+         -o /tmp/d50.deb \
          "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download" && \
     dpkg-deb -x /tmp/d50.deb /tmp/d50_extract && \
     find /tmp/d50_extract \( -name '*.290' -o -name '*.1476' \) \
@@ -56,7 +58,8 @@ RUN mkdir -p /usr/share/astap/data && \
     || (echo "FATAL: No star database files extracted from D50 .deb" >&2; exit 1)
 
 # G05 wider-field blind-solve database
-RUN wget -q -O /tmp/g05.deb --tries=5 --retry-connrefused --timeout=120 \
+RUN curl -L --retry 5 --retry-connrefused --connect-timeout 30 --max-time 600 \
+         -o /tmp/g05.deb \
          "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download" && \
     dpkg-deb -x /tmp/g05.deb /tmp/g05_extract && \
     find /tmp/g05_extract \( -name '*.290' -o -name '*.1476' \) \
