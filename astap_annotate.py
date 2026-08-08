@@ -388,6 +388,65 @@ def _decode_raw(raw_path: str) -> tuple[np.ndarray, np.ndarray]:
     return gray, rgb16
 
 
+# File extensions that rawpy can handle (RAW camera formats).
+_RAW_EXTENSIONS = {'.nef', '.cr2', '.arw', '.dng', '.orf', '.rw2', '.raf',
+                   '.pef', '.srw', '.3fr', '.dcr', '.kdc', '.mrw', '.nrw',
+                   '.raw', '.rwl', '.srf', '.x3f'}
+
+# Image formats we can load directly with PIL/OpenCV (non-RAW).
+_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp',
+                     '.webp', '.gif', '.ppm', '.pgm'}
+
+
+def _is_raw(path: str) -> bool:
+    return Path(path).suffix.lower() in _RAW_EXTENSIONS
+
+
+def _is_image(path: str) -> bool:
+    return Path(path).suffix.lower() in _IMAGE_EXTENSIONS
+
+
+def _load_image(image_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Load a standard image (PNG, JPEG, TIFF, …) and return
+    (gray_for_solving, rgb_for_display) — same contract as _decode_raw."""
+    # PIL handles orientation, colour profiles, and bit depth automatically.
+    pil_img = Image.open(image_path)
+    # Convert to RGB (handles greyscale, RGBA, palette images)
+    if pil_img.mode in ('RGBA', 'LA', 'P'):
+        pil_img = pil_img.convert('RGBA').convert('RGB')
+    elif pil_img.mode not in ('RGB', 'L'):
+        pil_img = pil_img.convert('RGB')
+
+    rgb = np.asarray(pil_img)
+    # If loaded as greyscale, expand to 3-channel for uniform handling
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb, rgb, rgb], axis=-1)
+    elif rgb.shape[2] == 4:  # RGBA
+        rgb = rgb[:, :, :3]
+
+    # 8-bit images — scale to 16-bit range so downstream code
+    # (bake_png_annotations) sees consistent brightness.
+    if rgb.dtype == np.uint8:
+        rgb = rgb.astype(np.uint16) * 257  # 8→16 bit: multiply by 257
+
+    gray = cv2.cvtColor(rgb.astype(np.uint16), cv2.COLOR_RGB2GRAY)
+    return gray, rgb
+
+
+def _decode_input(input_path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Load any supported image (RAW or standard format), returning
+    (gray_for_solving, rgb_for_display)."""
+    if _is_raw(input_path):
+        return _decode_raw(input_path)
+    if _is_image(input_path):
+        return _load_image(input_path)
+    # Fallback: try rawpy first, then PIL
+    try:
+        return _decode_raw(input_path)
+    except Exception:
+        return _load_image(input_path)
+
+
 def decode_raw_to_fits(raw_path: str, fits_path: str) -> tuple[int, int]:
     """Decode a NEF (or other rawpy-supported RAW) to a mono FITS for ASTAP.
     Returns (height, width) of the decoded image."""
@@ -1297,11 +1356,11 @@ def run_astap_annotation(config: dict[str, Any]) -> tuple[Optional[dict[str, Any
     fits_path = str(TEMP_DIR / f"{session_id}.fits")
 
     try:
-        gray, rgb16 = _decode_raw(input_nef)
+        gray, rgb16 = _decode_input(input_nef)
         img_shape = gray.shape
         fits.HDUList([fits.PrimaryHDU(gray)]).writeto(fits_path, overwrite=True)
     except Exception:
-        log.exception("RAW decode failed for %s", input_nef)
+        log.exception("Image decode failed for %s", input_nef)
         return None, None, []
 
     hint_ra_deg, hint_dec_deg = _parse_ra_dec(config.get("ra"), config.get("dec"))
