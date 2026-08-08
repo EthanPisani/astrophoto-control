@@ -657,30 +657,46 @@ def build_wcs_metadata(fits_path: str, img_shape: tuple[int, int],
 
 def _map_dso_objects(wcs_obj: WCS, width: int, height: int, pixel_scale_arcmin: float) -> list[DsoAnnotation]:
     out: list[DsoAnnotation] = []
-    for item in load_dso_catalog():
+    catalog = load_dso_catalog()
+    in_frame = 0
+    for item in catalog:
         px, py = wcs_obj.world_to_pixel_values(item["ra"], item["dec"])
         if not (0 <= px <= width and 0 <= py <= height):
             continue
+        in_frame += 1
         diameter_arcmin = item.get("diameter", 0.0)
         out.append(DsoAnnotation(
             name=item["name"], obj_type="Gx", ra=item["ra"], dec=item["dec"],
             catalog_kind=item["type"], pixel_x=float(px), pixel_y=float(py),
             diameter_arcmin=diameter_arcmin,
         ))
+    log.info("DSO mapping: %d loaded, %d in frame", len(catalog), in_frame)
     return out
 
 
 def _map_known_stars(wcs_obj: WCS, width: int, height: int, margin: float = 40.0) -> list[DsoAnnotation]:
     out: list[DsoAnnotation] = []
-    for star in load_known_stars():
+    stars = load_known_stars()
+    in_frame = 0
+    for star in stars:
         px, py = wcs_obj.world_to_pixel_values(star["ra"], star["dec"])
         if not (-margin <= px <= width + margin and -margin <= py <= height + margin):
             continue
+        in_frame += 1
         out.append(DsoAnnotation(
             name=star["name"], obj_type="star", ra=star["ra"], dec=star["dec"],
             catalog_kind="star", pixel_x=float(px), pixel_y=float(py),
         ))
+    log.info("Known stars: %d loaded, %d in frame", len(stars), in_frame)
     return out
+
+
+def _find_star_name(ra_deg: float, dec_deg: float, tolerance_deg: float = 0.02) -> Optional[str]:
+    """Look up a named star by RA/Dec in the known stars catalogue."""
+    for star in load_known_stars():
+        if abs(star["ra"] - ra_deg) < tolerance_deg and abs(star["dec"] - dec_deg) < tolerance_deg:
+            return star["name"]
+    return None
 
 
 def _map_constellation_lines(wcs_obj: WCS, width: int, height: int,
@@ -715,25 +731,31 @@ def _map_constellation_lines(wcs_obj: WCS, width: int, height: int,
                             catalog_kind="star", pixel_x=float(x), pixel_y=float(y),
                         ))
     
+    log.info("Constellation lines: %d segments visible, %d endpoint stars labeled",
+             len(visible_segments), len(star_annotations))
     return visible_segments, star_annotations
-
-
-def _find_star_name(ra: float, dec: float, tolerance_deg: float = 0.001) -> Optional[str]:
-    """Find a star name from known_stars catalog matching the given coordinates."""
-    for star in load_known_stars():
-        if abs(star["ra"] - ra) < tolerance_deg and abs(star["dec"] - dec) < tolerance_deg:
-            return star["name"]
-    return None
 
 
 def _dedupe_by_priority(annotations: list[DsoAnnotation], sep_px: float = 45.0) -> list[DsoAnnotation]:
     """Same idea as siril_annotate.py's _dedupe_dso_by_priority, done in
     pixel space (we already know the frame's pixel scale, no need for
-    SkyCoord separations here)."""
+    SkyCoord separations here).
+
+    Only deduplicates objects of the SAME catalog_kind.  A star (e.g. Sadr)
+    sitting on top of a DSO (e.g. IC 1318, the Gamma Cygni Nebula) are
+    different objects and both should appear; the old cross-type dedup was
+    silently eating named stars that happened to be co-located with a DSO
+    catalogue entry.
+    """
     ordered = sorted(annotations, key=lambda a: _catalog_priority(a.catalog_kind))
     kept: list[DsoAnnotation] = []
     for ann in ordered:
-        if any(math.hypot(ann.pixel_x - k.pixel_x, ann.pixel_y - k.pixel_y) < sep_px for k in kept):
+        # only compare against kept entries of the SAME catalog_kind
+        if any(
+            k.catalog_kind == ann.catalog_kind
+            and math.hypot(ann.pixel_x - k.pixel_x, ann.pixel_y - k.pixel_y) < sep_px
+            for k in kept
+        ):
             continue
         kept.append(ann)
     return kept
@@ -749,7 +771,8 @@ def map_and_annotate(fits_path: str, img_shape: tuple[int, int], pixel_scale_arc
     
     # Combine all annotations and deduplicate
     all_annotations = _dedupe_by_priority(dso + stars + constellation_stars)
-    
+    log.info("Annotation totals: DSO=%d stars=%d constellation=%d → after dedup=%d",
+             len(dso), len(stars), len(constellation_stars), len(all_annotations))
     return all_annotations, constellation_segments
 
 
@@ -1211,17 +1234,6 @@ _pixel_scale_arcmin_cache = [0.0033 * 60.0]
 # Data structures (field-for-field match with siril_annotate.py's DsoAnnotation
 # so downstream consumers of `dso_annotations` need no changes)
 # ---------------------------------------------------------------------------
-
-@dataclass
-class DsoAnnotation:
-    name: str
-    obj_type: str
-    ra: float
-    dec: float
-    catalog_kind: str = ""
-    pixel_x: float = 0.0
-    pixel_y: float = 0.0
-    diameter_arcmin: float = 0.0
 
 
 @dataclass
