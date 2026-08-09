@@ -363,6 +363,40 @@ class AstroDb:
             ),
         )
  
+    def cleanup_stale_sessions(self) -> int:
+        """Mark any sessions left in a non-terminal state as errored.
+
+        After a crash / power-off / restart, sessions that were 'running',
+        'paused', or 'canceling' have no worker thread to complete them.
+        Mark them as 'error' so the UI doesn't get stuck forever.
+
+        Returns the number of sessions that were cleaned up.
+        """
+        stale_statuses = {"running", "paused", "canceling"}
+        placeholders = ",".join("?" for _ in stale_statuses)
+        cur = self._execute(
+            f"SELECT id, status FROM sessions WHERE status IN ({placeholders})",
+            tuple(stale_statuses),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return 0
+        now = utc_now_iso()
+        for row in rows:
+            self.update_session_fields(
+                row["id"],
+                status="error",
+                error="Server restarted — session interrupted",
+                completed_at=now,
+                current_capture_id=None,
+                current_capture_started_at=None,
+            )
+            log.info(
+                "startup cleanup: marked stale session %s (was %s) as error",
+                row["id"], row["status"],
+            )
+        return len(rows)
+
     def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = self._execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         row = cur.fetchone()
@@ -1389,6 +1423,9 @@ def disk_stats_cached(path: Path, ttl_s: float = 30.0) -> dict[str, Any]:
 app = Flask(__name__, static_folder="static", template_folder="templates")
 api_client = NikonApiClient(GPHOTO_API_BASE)
 db = AstroDb(DB_PATH)
+_stale_cleaned = db.cleanup_stale_sessions()
+if _stale_cleaned:
+    log.info("startup: cleaned up %d stale session(s) from previous run", _stale_cleaned)
 session_manager = SessionManager(db, api_client)
 STARTED_AT = time.time()
  
