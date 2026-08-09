@@ -1049,27 +1049,68 @@ class SyncWorker:
     enqueued here to run asynchronously on a single daemon thread. That
     way the session loop never stalls waiting for a network filesystem
     write.
+
+    Uses ``shutil.copyfile`` (data-only copy) rather than ``copy2``
+    because NFS servers routinely reject the ``os.utime`` / ``os.chmod``
+    calls that ``copy2`` appends — and when those fail *after* the data
+    has already been written, ``copy2`` raises, the exception is caught,
+    and the caller never knows the file made it to disk.
     """
 
     def __init__(self, max_queue: int = 200):
         self._q: "queue.Queue[tuple[Path, Path, str]]" = queue.Queue(maxsize=max_queue)
+        self._errors: int = 0
+        self._ok: int = 0
+        self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True, name="sync-worker")
         self._thread.start()
+
+    @property
+    def pending(self) -> int:
+        return self._q.qsize()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {"ok": self._ok, "errors": self._errors, "pending": self._q.qsize()}
 
     def enqueue_copy(self, src: Path, dest_dir: Path, name: str) -> None:
         try:
             self._q.put_nowait((src, dest_dir, name))
         except queue.Full:
             log.error("sync queue full, dropping copy for %s -> %s", src, dest_dir)
+            with self._lock:
+                self._errors += 1
 
     def _run(self) -> None:
         while True:
             src, dest_dir, name = self._q.get()
+            dest = dest_dir / name
             try:
                 dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest_dir / name)
+                # copyfile is data-only — no chmod, no utime.
+                # Those metadata calls are the #1 cause of silent
+                # NFS copy failures, and we don't need them.
+                shutil.copyfile(src, dest)
+                # Best-effort metadata — never let it invalidate a
+                # successful data copy.
+                try:
+                    shutil.copystat(src, dest)
+                except Exception:
+                    pass
+            except FileNotFoundError:
+                # Source disappeared (e.g. night-rollover wipe beat us
+                # to it) — not a transport failure, just a race.
+                log.warning("sync copy skipped (source gone): %s -> %s", src, dest)
+                with self._lock:
+                    self._errors += 1
             except Exception as exc:  # noqa: BLE001
-                log.warning("background copy failed %s -> %s: %s", src, dest_dir, exc)
+                log.warning("sync copy FAILED %s -> %s: %s", src, dest, exc)
+                with self._lock:
+                    self._errors += 1
+            else:
+                with self._lock:
+                    self._ok += 1
             finally:
                 self._q.task_done()
 
@@ -1587,6 +1628,7 @@ def health_api() -> tuple[Any, int] | Any:
     payload = {
         "camera": camera_state,
         "disk": disk_stats(OUTPUT_BASE_DIR),
+        "sync_worker": sync_worker.stats,
         "current_session": session,
         "server_uptime_s": int(time.time() - STARTED_AT),
     }
