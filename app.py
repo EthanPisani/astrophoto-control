@@ -1077,12 +1077,14 @@ class SyncWorker:
     def enqueue_copy(self, src: Path, dest_dir: Path, name: str) -> None:
         try:
             self._q.put_nowait((src, dest_dir, name))
+            log.info("sync enqueue %s -> %s", src, dest_dir / name)
         except queue.Full:
             log.error("sync queue full, dropping copy for %s -> %s", src, dest_dir)
             with self._lock:
                 self._errors += 1
 
     def _run(self) -> None:
+        log.info("sync-worker thread started")
         while True:
             src, dest_dir, name = self._q.get()
             dest = dest_dir / name
@@ -1109,6 +1111,8 @@ class SyncWorker:
                 with self._lock:
                     self._errors += 1
             else:
+                src_size = src.stat().st_size if src.exists() else 0
+                log.info("sync copy ok %s -> %s (%s bytes)", src, dest, src_size)
                 with self._lock:
                     self._ok += 1
             finally:
