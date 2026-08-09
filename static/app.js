@@ -272,13 +272,22 @@
         // customized it).
         if (seq === "biases") {
           applyShutterPreset(els.shutterPreset?.value || "1/4000");
-        } else if (
-          els.exposureSeconds &&
-          (els.exposureSeconds.value === "" ||
-            els.exposureSeconds.value === SEQ_DEFAULT_EXPOSURE[previousSeq])
-        ) {
-          els.exposureSeconds.value = SEQ_DEFAULT_EXPOSURE[seq] || els.exposureSeconds.value;
+        } else {
+          // Lights, darks, and flats always use bulb for timed long
+          // exposures. Reset shutter_speed to "bulb" so a stale value
+          // (e.g. "1/4000" left by biases, or "1/13" left by the
+          // auto-flat-exposure calibrator) doesn't silently turn long
+          // exposures into black frames.
+          if (els.shutterSpeed) els.shutterSpeed.value = "bulb";
+          if (
+            els.exposureSeconds &&
+            (els.exposureSeconds.value === "" ||
+              els.exposureSeconds.value === SEQ_DEFAULT_EXPOSURE[previousSeq])
+          ) {
+            els.exposureSeconds.value = SEQ_DEFAULT_EXPOSURE[seq] || els.exposureSeconds.value;
+          }
         }
+
         scheduleEstimate();
       });
     });
