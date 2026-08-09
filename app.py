@@ -634,26 +634,33 @@ class SessionManager:
                             raise AstroError(err)
  
                         local_name = choose_local_filename(seq, capture_id, source_name)
-                        local_path = output_dir / local_name
+
+                        # Download straight to the local disk (fast).
+                        # The NFS session store gets an async copy through
+                        # the SyncWorker so the loop never stalls on a
+                        # network filesystem write.
+                        try:
+                            _ensure_local_night_dir()
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("local night rollover failed: %s", exc)
+                        local_path = LOCAL_OUTPUT_BASE_DIR / local_name
+                        LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
                         with self._call("download_capture_file", session=session_id, seq=seq, capture=capture_id):
                             self.api_client.download_capture_file(capture_id, local_path)
-                        
-                        try:
-                            # Mirror the frame onto the local disk in the
-                            # background. The SyncWorker owns the whole local
-                            # mirror — including astronomical-night rollover
-                            # (wiping the dir + rewriting the tracker) — on a
-                            # single consumer thread, so this never blocks the
-                            # session loop and a night-boundary wipe can never
-                            # race with a queued copy.
-                            sync_worker.enqueue_copy(local_path, LOCAL_OUTPUT_BASE_DIR, local_name)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning("Failed to enqueue local copy for %s: %s", local_path, exc)
+
+                        # Let the camera bridge release this capture now
+                        # that it's safely on local storage.
                         try:
                             with self._call("mark_downloaded", session=session_id, seq=seq, capture=capture_id):
                                 self.api_client.mark_downloaded(capture_id)
                         except Exception as exc:  # noqa: BLE001
                             log.warning("mark_downloaded failed for %s: %s", capture_id, exc)
+
+                        # Best-effort background mirror to the NFS session dir.
+                        try:
+                            sync_worker.enqueue_copy(local_path, output_dir, local_name)
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("failed to enqueue NFS copy for %s: %s", local_path, exc)
  
                         thumb_path = maybe_make_thumbnail(local_path, output_dir / "thumbs")
                         self.db.add_capture(
@@ -959,8 +966,27 @@ def get_session_date(dt: datetime | None = None) -> str:
         session_start_date = dt.date()
  
     return session_start_date.strftime("%Y%m%d")
- 
- 
+
+
+_last_local_night: Optional[str] = None
+
+
+def _ensure_local_night_dir() -> None:
+    """Ensure LOCAL_OUTPUT_BASE_DIR exists and belongs to the current
+    astronomical night, wiping it if the night boundary has been crossed
+    since the last call."""
+    global _last_local_night
+    night = get_session_date()
+    if _last_local_night is not None and _last_local_night != night:
+        if LOCAL_OUTPUT_BASE_DIR.exists():
+            shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
+    _last_local_night = night
+    LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    tracker_file = LOCAL_OUTPUT_BASE_DIR / ".current_night"
+    if not tracker_file.exists() or tracker_file.read_text().strip() != night:
+        tracker_file.write_text(night)
+
+
 def make_session_dir(session_name: str, sequence_type: str) -> tuple[Path, str]:
     """
     Creates/returns the capture directory for a session.
@@ -1015,60 +1041,37 @@ def maybe_make_thumbnail(source_path: Path, thumbs_dir: Path) -> Optional[Path]:
  
  
 class SyncWorker:
-    """Background worker that performs file copies off the hot path.
+    """Background worker that copies files into the NFS session store.
 
     OUTPUT_BASE_DIR (the capture store) lives on an NFSv4 network share
-    while LOCAL_OUTPUT_BASE_DIR is a fast local disk. Mirroring each just-
-    downloaded frame NFS -> local synchronously in the session loop would
-    stall every frame on a filesystem copy, so copies are enqueued here
-    and executed one-at-a-time on a single daemon thread instead.
-
-    The worker is also the single owner of the local mirror directory:
-    astronomical-night rollover (wiping the mirror + rewriting the
-    .current_night tracker) happens on this same thread, immediately
-    before the first copy of a new night. Because one consumer thread
-    handles both the rollover and every copy in FIFO order, a night-
-    boundary wipe can never race with a queued copy from the previous
-    night (which would otherwise land in the freshly-wiped dir).
+    while LOCAL_OUTPUT_BASE_DIR is a fast local disk — so every frame is
+    downloaded to local storage synchronously, and the NFS copy is
+    enqueued here to run asynchronously on a single daemon thread. That
+    way the session loop never stalls waiting for a network filesystem
+    write.
     """
 
     def __init__(self, max_queue: int = 200):
-        self._q: "queue.Queue[tuple[Path, Path, str, str]]" = queue.Queue(maxsize=max_queue)
-        self._mirror_night: Optional[str] = None
+        self._q: "queue.Queue[tuple[Path, Path, str]]" = queue.Queue(maxsize=max_queue)
         self._thread = threading.Thread(target=self._run, daemon=True, name="sync-worker")
         self._thread.start()
 
     def enqueue_copy(self, src: Path, dest_dir: Path, name: str) -> None:
-        # Resolve the astronomical night at enqueue time so the label
-        # matches when the frame was captured, not when the worker happens
-        # to get to it (a session can straddle a night boundary).
         try:
-            self._q.put_nowait((src, dest_dir, name, get_session_date()))
+            self._q.put_nowait((src, dest_dir, name))
         except queue.Full:
             log.error("sync queue full, dropping copy for %s -> %s", src, dest_dir)
 
     def _run(self) -> None:
         while True:
-            src, dest_dir, name, night = self._q.get()
+            src, dest_dir, name = self._q.get()
             try:
-                if Path(dest_dir).resolve() == LOCAL_OUTPUT_BASE_DIR.resolve():
-                    self._maybe_rollover_local_mirror(night)
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest_dir / name)
             except Exception as exc:  # noqa: BLE001
                 log.warning("background copy failed %s -> %s: %s", src, dest_dir, exc)
             finally:
                 self._q.task_done()
-
-    def _maybe_rollover_local_mirror(self, night: str) -> None:
-        if self._mirror_night is not None and self._mirror_night != night:
-            if LOCAL_OUTPUT_BASE_DIR.exists():
-                shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
-        self._mirror_night = night
-        LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
-        tracker_file = LOCAL_OUTPUT_BASE_DIR / ".current_night"
-        if not tracker_file.exists() or tracker_file.read_text().strip() != night:
-            tracker_file.write_text(night)
 
 
 sync_worker = SyncWorker()
