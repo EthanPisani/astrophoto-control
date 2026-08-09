@@ -1238,21 +1238,27 @@ def build_capture_request(config: dict[str, Any]) -> dict[str, Any]:
     # reliably hit (USB round-trip latency alone can be tens of ms), so
     # sub-second exposures — bias frames in particular, down to 1/4000s —
     # need the camera's own electronic/mechanical shutter timing instead.
-    # If the caller didn't explicitly pick a shutter speed, derive one
-    # from the requested exposure whenever it's sub-second; otherwise
-    # keep defaulting to "bulb" for normal long-exposure lights/darks.
-    if not shutter_speed or shutter_speed.lower() == "bulb":
-        if exposure_seconds < 1:
+    # The shutter_speed override field only matters for sub-second
+    # exposures; for anything >= 1s we ALWAYS force bulb — this prevents
+    # a stale non-bulb shutter_speed (e.g. "1/13" left over from the
+    # auto-flat-exposure calibrator) from silently turning a 30s light
+    # frame into a 1/13s black frame.
+    if exposure_seconds < 1:
+        if not shutter_speed or shutter_speed.lower() == "bulb":
             shutter_speed = format_shutter_speed(exposure_seconds)
-        else:
-            shutter_speed = shutter_speed or "bulb"
+        # else: honour the user's explicit shutter_speed override
+        #        (e.g. "1/4000" for bias frames)
+    else:
+        shutter_speed = "bulb"
 
     is_bulb = shutter_speed.lower() == "bulb"
 
-    payload: dict[str, Any] = {
-        "shutter_speed": shutter_speed,
-        "capture_target": config.get("capture_target") or "sdram",
-    }
+    # Build payload in the EXACT same field order as the platesolve path,
+    # which always produces:
+    #   {"shutter_speed":"bulb","exposure_seconds":30,"iso":"400","capture_target":"sdram"}
+    # nikon_bulb_server (Rust/serde) may be sensitive to field ordering.
+    payload: dict[str, Any] = {}
+    payload["shutter_speed"] = shutter_speed
 
     # nikon_bulb_server's CaptureRequest.exposure_seconds is a nullable
     # *integer* (int64) — it's only meaningful as the hold duration for
@@ -1264,17 +1270,16 @@ def build_capture_request(config: dict[str, Any]) -> dict[str, Any]:
     if is_bulb:
         payload["exposure_seconds"] = max(1, round(exposure_seconds))
 
-    optional_fields = [
-        "iso"
-    ]
-    for field in optional_fields:
-        value = config.get(field)
-        if value not in (None, ""):
-            payload[field] = value
- 
-    if "iso" in payload:
-        payload["iso"] = str(payload["iso"])
- 
+    # iso
+    iso_value = config.get("iso")
+    if iso_value not in (None, ""):
+        payload["iso"] = str(iso_value)
+
+    # capture_target
+    payload["capture_target"] = config.get("capture_target") or "sdram"
+
+    log.info("build_capture_request -> %s  (raw exposure=%.4f shutter=%r)",
+             json.dumps(payload), exposure_seconds, shutter_speed)
     return payload
 
 
@@ -1414,7 +1419,12 @@ def session_start() -> tuple[Any, int] | Any:
         "auto_recover_usb": data.get("auto_recover_usb"),
         "shutter_speed": data.get("shutter_speed") or "bulb",
     }
- 
+
+    log.info("session_start config: exposure=%.4f shutter=%r iso=%r",
+             exposure_seconds,
+             config.get("shutter_speed"),
+             config.get("iso"))
+
     try:
         session = session_manager.start(config, total=total)
     except AstroError as exc:
