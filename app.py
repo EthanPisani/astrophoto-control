@@ -229,6 +229,15 @@ class NikonApiClient:
         return self._json_request("POST", "/api/v1/recover")
  
  
+def _pid_is_alive(pid: int) -> bool:
+    """Return True if a process with the given PID currently exists."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
 class AstroDb:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -280,6 +289,16 @@ class AstroDb:
                 CREATE INDEX IF NOT EXISTS idx_session_captures_session_seq ON session_captures(session_id, seq);
                 """
             )
+            # Migration: server_pid tracks which OS process owns a running
+            # session so that startup cleanup can distinguish "worker thread
+            # from a dead process" (safe to clean) from "worker thread in
+            # another gunicorn worker that is still running" (must skip).
+            try:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN server_pid INTEGER"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             self._conn.commit()
  
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> sqlite3.Cursor:
@@ -370,19 +389,36 @@ class AstroDb:
         'paused', or 'canceling' have no worker thread to complete them.
         Mark them as 'error' so the UI doesn't get stuck forever.
 
+        Uses ``server_pid`` to avoid cleaning sessions that belong to a
+        different gunicorn worker process that is still alive.
+
         Returns the number of sessions that were cleaned up.
         """
         stale_statuses = {"running", "paused", "canceling"}
         placeholders = ",".join("?" for _ in stale_statuses)
         cur = self._execute(
-            f"SELECT id, status FROM sessions WHERE status IN ({placeholders})",
+            f"SELECT id, status, server_pid FROM sessions WHERE status IN ({placeholders})",
             tuple(stale_statuses),
         )
         rows = cur.fetchall()
         if not rows:
             return 0
+
+        current_pid = os.getpid()
         now = utc_now_iso()
+        cleaned = 0
         for row in rows:
+            server_pid = row["server_pid"]
+            # Skip sessions owned by another process that is still alive.
+            if server_pid is not None and server_pid != current_pid:
+                if _pid_is_alive(server_pid):
+                    log.info(
+                        "startup cleanup: skipping session %s (pid %d still alive)",
+                        row["id"], server_pid,
+                    )
+                    continue
+                # PID is dead — safe to clean (process crashed / was killed).
+
             self.update_session_fields(
                 row["id"],
                 status="error",
@@ -392,10 +428,11 @@ class AstroDb:
                 current_capture_started_at=None,
             )
             log.info(
-                "startup cleanup: marked stale session %s (was %s) as error",
-                row["id"], row["status"],
+                "startup cleanup: marked stale session %s (was %s, pid=%s) as error",
+                row["id"], row["status"], server_pid,
             )
-        return len(rows)
+            cleaned += 1
+        return cleaned
 
     def get_session(self, session_id: str) -> Optional[dict[str, Any]]:
         cur = self._execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -534,7 +571,7 @@ class SessionManager:
                 output_dir=str(output_dir),
                 total=total,
             )
-            self.db.update_session_fields(session_id, status="running", started_at=utc_now_iso())
+            self.db.update_session_fields(session_id, status="running", started_at=utc_now_iso(), server_pid=os.getpid())
  
             self._pause_event.set()
             self._cancel_event.clear()
@@ -632,7 +669,10 @@ class SessionManager:
             "session %s worker starting: total=%s exposure=%ss interval=%ss auto_recover=%s",
             session_id, total, exposure_seconds, interval_seconds, auto_recover,
         )
- 
+
+        global _local_session_active
+        _local_session_active = True
+
         try:
             for seq in range(1, total + 1):
                 if self._cancel_event.is_set():
@@ -824,6 +864,7 @@ class SessionManager:
                 current_capture_started_at=None,
             )
         finally:
+            _local_session_active = False
             with self._lock:
                 # NOTE: we deliberately do NOT clear self._active_session_id
                 # here. If we did, current_session() would immediately start
@@ -1025,18 +1066,31 @@ def get_session_date(dt: datetime | None = None) -> str:
 
 _last_local_night: Optional[str] = None
 _local_night_lock = threading.Lock()
+# Set to True by _run_session while a capture loop is active — prevents
+# _ensure_local_night_dir from wiping local files if the night boundary
+# (3 PM) is crossed mid-session.
+_local_session_active = False
 
 
 def _ensure_local_night_dir() -> None:
     """Ensure LOCAL_OUTPUT_BASE_DIR exists and belongs to the current
     astronomical night, wiping it if the night boundary has been crossed
     since the last call.  Thread-safe — only one caller performs the
-    rmtree/mkdir at a time."""
+    rmtree/mkdir at a time.
+
+    Does NOT wipe while a session is actively capturing — the wipe is
+    deferred until the next call when no session is running.
+    """
     global _last_local_night
     night = get_session_date()
     with _local_night_lock:
         if _last_local_night is not None and _last_local_night != night:
-            if LOCAL_OUTPUT_BASE_DIR.exists():
+            if _local_session_active:
+                log.info(
+                    "deferring local night wipe (%s -> %s): session is active",
+                    _last_local_night, night,
+                )
+            elif LOCAL_OUTPUT_BASE_DIR.exists():
                 shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
         _last_local_night = night
         LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1423,9 +1477,12 @@ def disk_stats_cached(path: Path, ttl_s: float = 30.0) -> dict[str, Any]:
 app = Flask(__name__, static_folder="static", template_folder="templates")
 api_client = NikonApiClient(GPHOTO_API_BASE)
 db = AstroDb(DB_PATH)
-_stale_cleaned = db.cleanup_stale_sessions()
-if _stale_cleaned:
-    log.info("startup: cleaned up %d stale session(s) from previous run", _stale_cleaned)
+try:
+    _stale_cleaned = db.cleanup_stale_sessions()
+    if _stale_cleaned:
+        log.info("startup: cleaned up %d stale session(s) from previous run", _stale_cleaned)
+except Exception as exc:
+    log.warning("startup cleanup failed (non-fatal): %s", exc)
 session_manager = SessionManager(db, api_client)
 STARTED_AT = time.time()
  
