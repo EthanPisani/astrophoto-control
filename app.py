@@ -1055,6 +1055,11 @@ class SyncWorker:
     calls that ``copy2`` appends — and when those fail *after* the data
     has already been written, ``copy2`` raises, the exception is caught,
     and the caller never knows the file made it to disk.
+
+    **Important for gunicorn + preload_app:** the daemon thread is NOT
+    started in ``__init__``.  Call ``_ensure_thread()`` after the worker
+    fork to spawn it.  The module-level ``get_sync_worker()`` helper
+    handles this automatically on first use.
     """
 
     def __init__(self, max_queue: int = 200):
@@ -1062,8 +1067,18 @@ class SyncWorker:
         self._errors: int = 0
         self._ok: int = 0
         self._lock = threading.Lock()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="sync-worker")
-        self._thread.start()
+        self._thread: Optional[threading.Thread] = None
+
+    def _ensure_thread(self) -> None:
+        """Start the consumer daemon thread if it isn't already running.
+        Idempotent — safe to call after every fork or on every enqueue."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._thread = threading.Thread(
+                target=self._run, daemon=True, name="sync-worker",
+            )
+            self._thread.start()
 
     @property
     def pending(self) -> int:
@@ -1075,6 +1090,7 @@ class SyncWorker:
             return {"ok": self._ok, "errors": self._errors, "pending": self._q.qsize()}
 
     def enqueue_copy(self, src: Path, dest_dir: Path, name: str) -> None:
+        self._ensure_thread()  # ← spawn thread on first use (post-fork safe)
         try:
             self._q.put_nowait((src, dest_dir, name))
             log.info("sync enqueue %s -> %s", src, dest_dir / name)
@@ -1084,7 +1100,7 @@ class SyncWorker:
                 self._errors += 1
 
     def _run(self) -> None:
-        log.info("sync-worker thread started")
+        log.info("sync-worker thread started (pid=%s)", os.getpid())
         while True:
             src, dest_dir, name = self._q.get()
             dest = dest_dir / name
@@ -1119,7 +1135,48 @@ class SyncWorker:
                 self._q.task_done()
 
 
-sync_worker = SyncWorker()
+# ---------------------------------------------------------------------------
+# Lazy SyncWorker singleton — safe for gunicorn + preload_app.
+#
+# With ``preload_app = True`` the app module is imported in the gunicorn
+# *master* process, then workers are forked.  POSIX fork() only preserves
+# the calling thread — any daemon threads created at import time are dead
+# in the child.  Worse, ``threading.Lock`` objects (used internally by
+# ``queue.Queue``) can be left in a locked/inconsistent state if the
+# master happened to hold them at the instant of the fork.
+#
+# Solution: never create the SyncWorker at module level.  Instead we keep
+# a lightweight proxy at module scope that creates the real instance on
+# first use *and* detects the fork (PID change) to re-create it in each
+# new worker.
+# ---------------------------------------------------------------------------
+_sync_worker_real: Optional[SyncWorker] = None
+_sync_worker_pid: Optional[int] = None
+_sync_worker_lock = threading.Lock()
+
+
+class _SyncWorkerProxy:
+    """Delegates every attribute access to the real SyncWorker, creating
+    (or re-creating after fork) it transparently."""
+
+    def _real(self) -> SyncWorker:
+        global _sync_worker_real, _sync_worker_pid
+        pid = os.getpid()
+        if _sync_worker_real is None or _sync_worker_pid != pid:
+            with _sync_worker_lock:
+                if _sync_worker_real is None or _sync_worker_pid != pid:
+                    _sync_worker_real = SyncWorker()
+                    _sync_worker_pid = pid
+        return _sync_worker_real
+
+    def enqueue_copy(self, src: Path, dest_dir: Path, name: str) -> None:
+        self._real().enqueue_copy(src, dest_dir, name)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real(), name)
+
+
+sync_worker: _SyncWorkerProxy = _SyncWorkerProxy()
  
  
 def estimate_schedule(

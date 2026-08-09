@@ -24,4 +24,9 @@ capture_output = True
 
 # Preload the app before forking workers.  This shares the catalog
 # data structures (loaded once) across workers, saving ~200 MB RAM.
+#
+# NOTE: preload_app means any daemon threads created at import time
+# will be DEAD after fork (POSIX only preserves the forking thread).
+# app.py's SyncWorker uses a lazy proxy that detects the fork via PID
+# change and re-creates itself in each worker, so this is safe.
 preload_app = True
