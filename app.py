@@ -198,14 +198,26 @@ class NikonApiClient:
             self._handle_error(resp)
  
     def download_capture_file(self, capture_id: str, dest_path: Path) -> None:
-        with self.session.get(self._url(f"/api/v1/captures/{capture_id}/file"), stream=True, timeout=max(HTTP_TIMEOUT, 120)) as resp:
-            if not resp.ok:
-                self._handle_error(resp)
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            with dest_path.open("wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        fh.write(chunk)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a temp file first, then atomically rename.  This
+        # prevents a partial/interrupted download from leaving a
+        # truncated file that looks complete.
+        tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+        try:
+            with self.session.get(self._url(f"/api/v1/captures/{capture_id}/file"), stream=True, timeout=max(HTTP_TIMEOUT, 120)) as resp:
+                if not resp.ok:
+                    self._handle_error(resp)
+                with tmp_path.open("wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            fh.write(chunk)
+            tmp_path.rename(dest_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
  
     def health(self) -> dict[str, Any]:
         return self._json_request("GET", "/api/v1/health")
@@ -526,7 +538,11 @@ class SessionManager:
         self._pause_event.set()
         self.db.update_session_fields(session["id"], status="canceling")
  
-        current_capture_id = session.get("current_capture_id")
+        # Snapshot current_capture_id under the lock so we don't race
+        # with the worker thread clearing it after a frame finishes.
+        with self._lock:
+            current_capture_id = self.db.get_session(session["id"])
+        current_capture_id = (current_capture_id or {}).get("current_capture_id") if current_capture_id else None
         if current_capture_id:
             try:
                 with self._call("cancel_capture(user stop)", session=session["id"], capture=current_capture_id):
@@ -727,7 +743,12 @@ class SessionManager:
                         while waited < backoff:
                             if self._cancel_event.is_set():
                                 break
-                            time.sleep(0.5)
+                            # Honour pause during retry backoff so the
+                            # user isn't stuck waiting for recovery.
+                            if not self._pause_event.is_set():
+                                self._pause_event.wait(timeout=0.5)
+                            else:
+                                time.sleep(0.5)
                             waited += 0.5
                         # loop back around and retry the same seq
  
@@ -969,22 +990,25 @@ def get_session_date(dt: datetime | None = None) -> str:
 
 
 _last_local_night: Optional[str] = None
+_local_night_lock = threading.Lock()
 
 
 def _ensure_local_night_dir() -> None:
     """Ensure LOCAL_OUTPUT_BASE_DIR exists and belongs to the current
     astronomical night, wiping it if the night boundary has been crossed
-    since the last call."""
+    since the last call.  Thread-safe — only one caller performs the
+    rmtree/mkdir at a time."""
     global _last_local_night
     night = get_session_date()
-    if _last_local_night is not None and _last_local_night != night:
-        if LOCAL_OUTPUT_BASE_DIR.exists():
-            shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
-    _last_local_night = night
-    LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
-    tracker_file = LOCAL_OUTPUT_BASE_DIR / ".current_night"
-    if not tracker_file.exists() or tracker_file.read_text().strip() != night:
-        tracker_file.write_text(night)
+    with _local_night_lock:
+        if _last_local_night is not None and _last_local_night != night:
+            if LOCAL_OUTPUT_BASE_DIR.exists():
+                shutil.rmtree(LOCAL_OUTPUT_BASE_DIR)
+        _last_local_night = night
+        LOCAL_OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+        tracker_file = LOCAL_OUTPUT_BASE_DIR / ".current_night"
+        if not tracker_file.exists() or tracker_file.read_text().strip() != night:
+            tracker_file.write_text(night)
 
 
 def make_session_dir(session_name: str, sequence_type: str) -> tuple[Path, str]:
@@ -1339,6 +1363,27 @@ def disk_stats(path: Path) -> dict[str, Any]:
         "free_gb": round(usage.free / (1024 ** 3), 2),
         "captures_dir_gb": round(captures_total / (1024 ** 3), 3),
     }
+
+
+# ---------------------------------------------------------------------------
+# Cached disk_stats — the full rglob() walk over SESSIONS_BASE_DIR can be
+# slow on NFS with many files, and the health endpoint calls it on every
+# poll.  Cache for 30 seconds to keep the UI responsive.
+# ---------------------------------------------------------------------------
+_disk_stats_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+_disk_stats_lock = threading.Lock()
+
+
+def disk_stats_cached(path: Path, ttl_s: float = 30.0) -> dict[str, Any]:
+    now = time.time()
+    with _disk_stats_lock:
+        if _disk_stats_cache["value"] is not None and now < _disk_stats_cache["expires_at"]:
+            return _disk_stats_cache["value"]
+    value = disk_stats(path)
+    with _disk_stats_lock:
+        _disk_stats_cache["value"] = value
+        _disk_stats_cache["expires_at"] = now + ttl_s
+    return value
  
  
 app = Flask(__name__, static_folder="static", template_folder="templates")
@@ -1698,7 +1743,7 @@ def health_api() -> tuple[Any, int] | Any:
 
     payload = {
         "camera": camera_state,
-        "disk": disk_stats(OUTPUT_BASE_DIR),
+        "disk": disk_stats_cached(OUTPUT_BASE_DIR),
         "sync_worker": sync_worker.stats,
         "current_session": session,
         "server_uptime_s": int(time.time() - STARTED_AT),

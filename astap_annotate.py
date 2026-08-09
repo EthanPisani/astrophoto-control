@@ -818,19 +818,20 @@ def _draw_target_indicator(draw: ImageDraw.ImageDraw, width: int, height: int,
                            target_ra_deg: float, target_dec_deg: float,
                            target_name: str,
                            target_offset_arcsec: float,
-                           border_offset_x: int, border_offset_y: int) -> None:
+                           border_offset_x: int, border_offset_y: int,
+                           wcs_path: str = "",
+                           pixel_scale_arcmin: float = 0.2) -> None:
     """Draw a red circle if the target is in the middle 3/4 of the frame,
     or a large red arrow at the frame edge pointing toward the target if
     it lies outside the frame.  Also renders the angular offset below
     the label (e.g. \"2.3°\" or \"145\\\"\").
 
-    Uses _pixel_scale_arcmin_cache[0] and the WCS from the most recent
-    solve (accessed via _cached_wcs_path global set in bake_png_annotations).
+    WCS path and pixel scale are passed as parameters from
+    bake_png_annotations (no globals — thread-safe for concurrent solves).
     """
     import math as _math
 
-    # Load WCS from the cached path set by bake_png_annotations
-    wcs_path = _cached_wcs_path
+    # WCS path is now passed as a parameter from bake_png_annotations.
     if not wcs_path or not os.path.exists(wcs_path):
         log.debug("No WCS available for target indicator")
         return
@@ -989,10 +990,6 @@ def _intersect_ray_with_rect(cx: float, cy: float, ux: float, uy: float,
     return cx + ux * t_min, cy + uy * t_min
 
 
-# Cache for WCS path so _draw_target_indicator can use it
-_cached_wcs_path: str = ""
-
-
 def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
                           constellation_segments: list[tuple[str, tuple[float, float], tuple[float, float]]],
                           output_path: str,
@@ -1000,7 +997,8 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
                           target_dec_deg: Optional[float] = None,
                           target_name: str = "",
                           target_offset_arcsec: float = -1.0,
-                          fits_path_hint: str = "") -> str:
+                          fits_path_hint: str = "",
+                          pixel_scale_arcmin: float = 0.2) -> str:
     """PIL-based bake matching siril_annotate.py's visual style:
       - constellation lines (cyan, thin, alpha ~0.65), drawn first
       - DSO circles with actual angular diameter, color-coded per catalogue
@@ -1014,10 +1012,9 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
     with no coordinate flip of any kind. See the orientation note above
     decode_raw_to_fits().
     """
-    global _cached_wcs_path
-    # Try to locate the WCS file from the FITS path hint
-    if fits_path_hint:
-        _cached_wcs_path = fits_path_hint.replace(".fits", ".wcs")
+    # Resolve WCS path from the FITS path hint (threaded through params,
+    # not a global — avoids concurrent solve races).
+    wcs_path = fits_path_hint.replace(".fits", ".wcs") if fits_path_hint else ""
 
     img_8bit = _stretch_to_8bit_rgb(rgb16)
     base_height, base_width = img_8bit.shape[:2]
@@ -1037,8 +1034,8 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
     base = Image.fromarray(img_8bit).convert("RGBA")
     draw = ImageDraw.Draw(base, "RGBA")
 
-    # Get pixel scale for diameter calculations
-    pixel_scale_arcmin = _pixel_scale_arcmin_cache[0]
+    # pixel_scale_arcmin is now a parameter (passed by the caller who
+    # computed it from the solved WCS) — no global cache needed.
     pixel_scale_deg = pixel_scale_arcmin / 60.0
     arcsec_per_pixel = pixel_scale_deg * 3600.0
 
@@ -1216,6 +1213,8 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
             target_ra_deg, target_dec_deg, target_name,
             target_offset_arcsec,
             border_offset_x, border_offset_y,
+            wcs_path=wcs_path,
+            pixel_scale_arcmin=pixel_scale_arcmin,
         )
 
     # Convert back to RGB and save
@@ -1223,12 +1222,6 @@ def bake_png_annotations(rgb16: np.ndarray, annotations: list[DsoAnnotation],
     base.save(output_path)
     return output_path
 
-
-# _pixel_scale_arcmin_cache is a one-element list used as a mutable cell so
-# bake_png_annotations (called after mapping) can see the frame's plate
-# scale without threading an extra parameter through every call site that
-# already exists in callers modeled on local_annotate.py/siril_annotate.py.
-_pixel_scale_arcmin_cache = [0.0033 * 60.0]
 
 # ---------------------------------------------------------------------------
 # Data structures (field-for-field match with siril_annotate.py's DsoAnnotation
@@ -1259,6 +1252,7 @@ class PlateSolveResult:
     n_stars_matched: int = 0
     annotations: list[DsoAnnotation] = field(default_factory=list)
     annotated_path: str = ""
+    target_offset_arcsec: float = -1.0  # angular separation from target
     wcs_json: str = ""            # serialized WCS for front-end overlay
 
 
@@ -1366,19 +1360,30 @@ def _api_get(path: str, timeout: int = HTTP_TIMEOUT) -> dict[str, Any]:
 
 def _download_file(path: str, dest: Path, timeout: int = 120) -> None:
     url = f"{GPHOTO_API_BASE}{path}"
-    with requests.get(url, stream=True, timeout=timeout) as resp:
-        if not resp.ok:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Write to temp file first, then atomically rename — prevents a
+    # partial/interrupted download from leaving a truncated file.
+    tmp_path = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        with requests.get(url, stream=True, timeout=timeout) as resp:
+            if not resp.ok:
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = {"error": resp.text}
+                msg = payload.get("message") or payload.get("error") or f"HTTP {resp.status_code}"
+                raise RuntimeError(msg)
+            with tmp_path.open("wb") as fh:
+                for chunk in resp.iter_content(1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
+        tmp_path.rename(dest)
+    finally:
+        if tmp_path.exists():
             try:
-                payload = resp.json()
-            except ValueError:
-                payload = {"error": resp.text}
-            msg = payload.get("message") or payload.get("error") or f"HTTP {resp.status_code}"
-            raise RuntimeError(msg)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with dest.open("wb") as fh:
-            for chunk in resp.iter_content(1024 * 1024):
-                if chunk:
-                    fh.write(chunk)
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 # ---------------------------------------------------------------------------
 # Top-level entry point -- same contract as run_flatpak_siril_annotation /
@@ -1433,9 +1438,9 @@ def run_astap_annotation(config: dict[str, Any]) -> tuple[Optional[dict[str, Any
 
     n_detected, n_matched = _parse_star_counts(astap_output)
     wcs_metadata = build_wcs_metadata(fits_path, img_shape, n_detected, n_matched)
-    _pixel_scale_arcmin_cache[0] = wcs_metadata["pixel_scale_arcmin"]
+    pixel_scale_arcmin = wcs_metadata["pixel_scale_arcmin"]
 
-    annotations, constellation_segments = map_and_annotate(fits_path, img_shape, wcs_metadata["pixel_scale_arcmin"])
+    annotations, constellation_segments = map_and_annotate(fits_path, img_shape, pixel_scale_arcmin)
 
     try:
         offset_arcsec = _angular_separation_arcsec(
@@ -1448,6 +1453,7 @@ def run_astap_annotation(config: dict[str, Any]) -> tuple[Optional[dict[str, Any
             target_name=str(config.get("target_name", "") or ""),
             target_offset_arcsec=offset_arcsec,
             fits_path_hint=fits_path,
+            pixel_scale_arcmin=pixel_scale_arcmin,
         )
     except Exception:
         log.exception("Annotation bake failed for %s", input_nef)
