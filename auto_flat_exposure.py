@@ -121,18 +121,60 @@ def bisect_flat_exposure(
 
     # ---- phase 2: bisect lo/hi ----
     converged = abs(frac - target_fraction) <= tolerance
+
+    # Track discrete fraction values we've already seen during bisection.
+    # When the exposure step becomes smaller than the measurement can
+    # resolve (e.g. half_size downsampling quantises the histogram peak
+    # into a handful of values), the bisection will oscillate forever
+    # between the same two fractions.  We detect that stall and fall
+    # back to the best result seen so far.
+    bisect_fractions_seen: set[float] = {frac}
+    bisect_stall_count = 0
+
     while not converged and len(history) < max_iterations and hi > lo:
+        # If the interval has shrunk to a meaningless size relative to
+        # the exposure value, further bisection just wastes test shots.
         mid = (lo + hi) / 2
+        if mid > 0 and (hi - lo) / mid < 0.005:
+            log.info("flat calib: bisection step too small (%.6f / %.6f), stopping",
+                     hi - lo, mid)
+            break
+
         mid_frac = sample(mid)
         exposure, frac = mid, mid_frac
 
         if abs(mid_frac - target_fraction) <= tolerance:
             converged = True
             break
+
+        # Detect stall: we keep seeing the same discrete fractions
+        # without making progress toward the target.
+        if mid_frac in bisect_fractions_seen:
+            bisect_stall_count += 1
+            if bisect_stall_count >= 3:
+                log.info("flat calib: measurement stalled (fraction resolution floor "
+                         "reached — seen %.4f repeatedly)", mid_frac)
+                break
+        else:
+            bisect_fractions_seen.add(mid_frac)
+            bisect_stall_count = 0
+
         if mid_frac < target_fraction:
             lo = mid
         else:
             hi = mid
+
+    # If we didn't converge, pick the single best (exposure, fraction)
+    # pair from the full history — the one whose fraction is closest
+    # to the target.
+    if not converged and history:
+        best = min(history, key=lambda item: abs(item[1] - target_fraction))
+        exposure, frac = best
+        # If even the best entry is within tolerance, call it converged.
+        if abs(frac - target_fraction) <= tolerance:
+            converged = True
+        log.info("flat calib: best result picked from history: exposure=%.6fs "
+                 "peak_fraction=%.4f (converged=%s)", exposure, frac, converged)
 
     return FlatExposureResult(
         exposure_seconds=exposure,
